@@ -240,3 +240,67 @@ Ambiente: SO/versao: ____ | CPU: ____ | Versao do binario Piper: ____ | Fonte (r
 - **NO-GO** caso contrario: considerar outras vozes, ou streaming de PCM via `--output-raw` (adiado pro M1), ou TTS alternativo (Kokoro, Supertonic — ver brainstorming 3).
 
 **Decisao:** ____ (data: ____)
+
+---
+
+## Spike Playback (M0-T08)
+
+**Status:** implementado, NAO compilado nem testado (escrito em WSL2 sem Rust). Medicoes pendentes no Windows.
+
+Objetivo (plano M0-T08, risco R-M0-5): responder com dados reais, no SO-alvo, (A) se `rodio` (out) e `cpal` (in) coexistem no mesmo device sem conflito de WASAPI, e (B) qual a latencia real de parar o playback (base do barge-in do M1: DoD exige parar o audio em < 200 ms). Decide o backend do `AudioOut` do M1-T10 (brainstorming 2.1 e 3: `cpal` puro in+out vs `rodio`).
+
+### O que foi implementado
+
+- `src-tauri/src/audio/playback.rs` (novo): `PlaybackHandle::play_wav(path, PlaybackBackend)`, `.stop() -> StopReport` (com `stop_latency_ms`) e `.is_playing()`. Thread OS dedicada (`audio-playback`) por playback, comandada por `crossbeam-channel` (`Stop`/`Shutdown`), mesma regra do `capture.rs` (o `cpal::Stream` e `!Send`). `Drop` envia `Shutdown` e junta a thread.
+  - **Backend Rodio:** `rodio::OutputStream` + `Sink` (device proprio do rodio), WAV decodificado por streaming (`Decoder`). `stop()` = `sink.stop()` + poll de 1 ms ate `sink.empty()` (teto de 1 s).
+  - **Backend Cpal:** WAV decodificado com `hound` (int 8/16/24/32 ou float; multicanal -> mono), resample com `rubato` para a taxa do device (o Piper emite 22,05 kHz), WAV inteiro colocado num `ringbuf` SPSC (`HeapRb`) ANTES do stream iniciar. O callback de saida so faz `pop_slice` (sem alocar/bloquear), expande mono -> N canais e escreve silencio no resto. `stop()` = seta flag atomica (o callback passa a escrever silencio no proximo periodo) + drop do `cpal::Stream`. Reporta tambem `samples_undrained` (o que sobrou no ringbuf).
+  - **Metricas logadas (`tracing`) e retornadas:** duracao do WAV, `start_ms`, `first_sample_ms` (so cpal), `stop_latency_ms`, `drained`, `underruns` (cpal).
+  - **Aproximacoes (importante ao ler os numeros):**
+    - `start_ms` = `play_wav` ate o stream estar iniciado. NAO e o primeiro sample audivel: soma ~1 periodo do device (5-20 ms tipico).
+    - `first_sample_ms` (cpal) = primeira invocacao do callback de saida = quando o device comecou a puxar samples. Melhor aproximacao observavel de dentro do Rust. Rodio: nao observavel (`None`) sem source customizada.
+    - `stop_latency_ms` no **cpal** = pedido de stop ate o drop do stream. No **rodio** = pedido de stop ate `sink.empty()`. Nenhum dos dois ve o buffer interno do WASAPI (10-20 ms em modo compartilhado), entao ambos SUBESTIMAM o stop acustico; o do rodio tende a subestimar mais. Se os numeros ficarem perto do limite de 200 ms, confirmar de ouvido ou gravando a saida.
+- Comandos Tauri (em `playback.rs`, registrados no `main.rs`): `play_wav_rust(path, backend)` (`"rodio"`/`"cpal"`), `stop_playback()` e `spike_conflict_test(path, backend)`. Estado `PlaybackState` (um playback por vez; novo play derruba o anterior). Operacoes bloqueantes via `spawn_blocking`.
+- `src/App.svelte`: secao "Playback em Rust (M0-T08)" com seletor Rodio/Cpal, botoes "Tocar via Rust", "Parar" e "Teste de conflito in+out". A tag `<audio>` original do spike TTS foi mantida para comparacao (ela nao permite medir stop no Rust).
+- `src-tauri/src/audio/mod.rs` e `main.rs`: modulo, `.manage(PlaybackState)` e comandos.
+- Sem novas dependencias (`cpal`, `rodio`, `ringbuf`, `rubato`, `hound`, `crossbeam-channel` ja estavam no `Cargo.toml`).
+- **ATENCAO — API do rodio:** a versao exata e a API (`OutputStream::try_default()` + `Sink::try_new` + `Decoder::new`) NAO foram verificadas. Confirmar no primeiro `cargo build` no Windows e ajustar `rodio_control`/`rodio_stop` se necessario.
+- **Fora de escopo (M1):** FSM, barge-in integrado a logica do assistente, fila/streaming de TTS, niveis RMS para a UI.
+
+### Como testar no Windows (item B: latencia de stop)
+
+1. Garantir o TTS do M0-T07 funcionando (binario do Piper e voz). `$env:RUST_LOG="info"` e `npm run tauri dev`.
+2. Digitar uma frase LONGA (a 5 ou 6 da secao TTS, >= 8 s de audio) e clicar "Falar". Isso gera o WAV em `src-tauri/captures/tts/`.
+3. Selecionar **Rodio**, clicar "Tocar via Rust". Conferir nos logs: `device`, `start_ms`, duracao do WAV. Confirmar de ouvido que a velocidade/tom estao corretos.
+4. Clicar "Parar" em momentos diferentes: logo no inicio (~0,5 s), no meio e perto do fim (~1 s antes de acabar). Anotar `stop_latency_ms` (tela e log) de cada tentativa. Repetir 5x por ponto, anotando min/mediana/max.
+5. Repetir os passos 3-4 com **Cpal**. Anotar tambem `first_sample_ms`, `samples_undrained` e `underruns` (deve ser 0).
+6. Comparar com a tag `<audio>` (so de ouvido: ela nao tem medicao).
+7. Se possivel, validar o stop acustico de ouvido ou gravando saida e clique: `stop_latency_ms` e proxy, nao a medida acustica final.
+
+### Teste de conflito in+out (item A)
+
+**Automatico (botao "Teste de conflito in+out"):** inicia a captura (`AudioCapture::start`, mesmo caminho do PTT/M0-T05), toca o WAV por cima com o backend selecionado, espera a duracao do WAV + 0,5 s, para o playback (medindo o stop COM a captura ativa, cenario real de barge-in) e finaliza a captura, gravando o WAV. A UI mostra `captura OK/FALHOU`, `playback OK/FALHOU` e erros de device. Rodar uma vez por backend, falando algo durante o teste, e conferir se o WAV de captura (`src-tauri/captures/`) tem audio sem cortes/glitches. O comando "Falar" precisa ter sido usado antes (precisa de um WAV).
+
+**Manual (alternativa / confirmacao, cobre a captura via atalho real):**
+1. Selecionar o backend, gerar um WAV longo.
+2. Segurar `Ctrl+Shift+Space` (captura ativa) e, ainda segurando, clicar "Tocar via Rust".
+3. Ver nos logs se ha erro de device (`falha ao abrir o stream`, `AUDCLNT_E_DEVICE_IN_USE`, `exclusive`...), se o `capture` finalizou com `dropped_samples = 0` e se o playback tocou limpo.
+4. Testar tambem com um app externo usando o mic/saida em modo exclusivo (Configuracoes de Som > Propriedades do dispositivo > Avancado > "Permitir que aplicativos assumam o controle exclusivo"), ligado e desligado, para provocar o conflito de WASAPI.
+
+### Resultados (preencher no Windows)
+
+Ambiente: SO/versao: ____ | Device de saida (nome/taxa/canais): ____ | Device de entrada: ____ | Versoes de `cpal` / `rodio` resolvidas: ____
+
+| Backend | Playback inicia ok? | Stop latency (ms) | In+Out simultaneo funciona? | Observacoes (erros de device, glitches) |
+|---|---|---|---|---|
+| Rodio | | | | |
+| Cpal | | | | |
+
+Para o campo "Stop latency", anotar min/mediana/max e o ponto do audio onde foi clicado (inicio/meio/fim). Anotar tambem `start_ms`, `first_sample_ms` (cpal) e `underruns`.
+
+### Criterio de go/no-go
+
+- **GO** se o stop latency < 200 ms (alvo de barge-in do M1 DoD) em pelo menos um dos backends, E se o in+out simultaneo funciona (sem erro de WASAPI exclusivo) no mesmo backend. Isso decide qual backend o M1-T10 usa.
+- Se os dois backends passarem, preferir o **cpal** (brainstorming 3: mais controle de latencia e de cancelamento, sem segundo device aberto), salvo se o rodio for claramente mais simples sem custo na latencia.
+- **NO-GO** caso contrario: investigar buffer size do cpal/WASAPI, device unico compartilhado por in e out, ou outro backend de saida.
+
+**Decisao:** ____ (data: ____)

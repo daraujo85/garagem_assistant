@@ -63,6 +63,64 @@
     }
   }
 
+  // Spike playback (M0-T08): toca o WAV do TTS em Rust (rodio ou cpal) e mede o stop. Descartavel.
+  // `play_wav_rust` / `stop_playback` / `spike_conflict_test` em audio/playback.rs. A tag <audio>
+  // acima fica para comparacao: ela nao permite medir a latencia de stop do lado Rust.
+  let pbBackend = $state("rodio");
+  let pbBusy = $state(false);
+  let pbInfo = $state(null);
+  let pbStop = $state(null);
+  let pbError = $state("");
+  let conflict = $state(null);
+
+  async function playRust() {
+    if (!ttsResult) return;
+    pbBusy = true;
+    pbError = "";
+    pbStop = null;
+    conflict = null;
+    try {
+      pbInfo = await invoke("play_wav_rust", { path: ttsResult.wav_path, backend: pbBackend });
+    } catch (e) {
+      pbInfo = null;
+      pbError = String(e);
+    } finally {
+      pbBusy = false;
+    }
+  }
+
+  async function stopRust() {
+    pbError = "";
+    try {
+      // `performance.now()` so da o round-trip IPC; a medida valida e `stop_latency_ms` (log Rust).
+      pbStop = await invoke("stop_playback");
+    } catch (e) {
+      pbStop = null;
+      pbError = String(e);
+    }
+  }
+
+  // Teste de conflito in+out (pergunta A): captura + playback juntos, por backend. Bloqueia a UI
+  // pela duracao do WAV + ~0,5 s.
+  async function conflictTest() {
+    if (!ttsResult) return;
+    pbBusy = true;
+    pbError = "";
+    pbInfo = null;
+    pbStop = null;
+    try {
+      conflict = await invoke("spike_conflict_test", {
+        path: ttsResult.wav_path,
+        backend: pbBackend,
+      });
+    } catch (e) {
+      conflict = null;
+      pbError = String(e);
+    } finally {
+      pbBusy = false;
+    }
+  }
+
   onMount(() => {
     // `listen` e async; guardamos as promises para desinscrever no cleanup (evita listener
     // duplicado com HMR do dev server).
@@ -146,6 +204,46 @@
     {/if}
     {#if ttsError}<p class="error">{ttsError}</p>{/if}
   </section>
+  <section class="playback">
+    <h3>Playback em Rust (M0-T08)</h3>
+    <label>
+      Backend:
+      <select bind:value={pbBackend} disabled={pbBusy}>
+        <option value="rodio">Rodio</option>
+        <option value="cpal">Cpal</option>
+      </select>
+    </label>
+    <button onclick={playRust} disabled={pbBusy || !ttsResult}>Tocar via Rust</button>
+    <button onclick={stopRust} disabled={pbBusy}>Parar</button>
+    <button onclick={conflictTest} disabled={pbBusy || !ttsResult}>
+      {pbBusy ? "Aguarde..." : "Teste de conflito in+out"}
+    </button>
+    {#if !ttsResult}<p class="counts">Gere uma fala com "Falar" primeiro.</p>{/if}
+    {#if pbInfo}
+      <p class="counts">
+        {pbInfo.backend} | wav {pbInfo.wav_secs.toFixed(2)} s | start ~{pbInfo.start_ms} ms
+        (1o callback: ver log; so cpal)
+      </p>
+    {/if}
+    {#if pbStop}
+      <p class="counts">
+        Stop {pbStop.backend}: <strong>{pbStop.stop_latency_ms} ms</strong> |
+        drenou: {pbStop.drained ? "sim" : "nao"}
+        {#if pbStop.samples_undrained !== null}| samples nao tocados: {pbStop.samples_undrained}{/if}
+      </p>
+    {/if}
+    {#if conflict}
+      <p class="counts">
+        Conflito ({conflict.backend}): captura {conflict.capture_ok ? "OK" : "FALHOU"} |
+        playback {conflict.playback_ok ? "OK" : "FALHOU"} |
+        sobreposicao {conflict.overlap_secs.toFixed(1)} s
+        {#if conflict.stop_report}| stop {conflict.stop_report.stop_latency_ms} ms{/if}
+      </p>
+      {#if conflict.capture_error}<p class="error">captura: {conflict.capture_error}</p>{/if}
+      {#if conflict.playback_error}<p class="error">playback: {conflict.playback_error}</p>{/if}
+    {/if}
+    {#if pbError}<p class="error">{pbError}</p>{/if}
+  </section>
 </main>
 
 <style>
@@ -193,7 +291,20 @@
     font-size: 0.95rem;
     max-width: 90%;
   }
-  .tts h3 {
+  .playback {
+    text-align: center;
+    font-size: 0.95rem;
+    max-width: 90%;
+  }
+  .playback select {
+    background: #1e1e2a;
+    color: #e6e6ee;
+    border: 1px solid #33334a;
+    border-radius: 4px;
+    padding: 0.15rem 0.3rem;
+  }
+  .tts h3,
+  .playback h3 {
     margin: 0 0 0.5rem;
     font-size: 0.9rem;
     opacity: 0.8;

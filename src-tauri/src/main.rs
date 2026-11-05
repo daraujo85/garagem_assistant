@@ -5,7 +5,7 @@
 // A pasta e `core/` (fiel a arquitetura), mas o modulo se chama `brain` via #[path]: um
 // `mod core` na raiz sombrearia o crate `core` da std e pode gerar ambiguidade de paths.
 // Spike de captura (M0-T05) usado pelo shortcut.rs; spike STT (M0-T06) em audio/stt.rs; spike TTS
-// (M0-T07) em audio/tts_piper.rs.
+// (M0-T07) em audio/tts_piper.rs; spike de playback (M0-T08) em audio/playback.rs.
 #[allow(dead_code)]
 mod audio;
 #[allow(dead_code)]
@@ -51,6 +51,8 @@ fn main() {
         .manage(shortcut::AudioState::default())
         // Estado do spike STT (M0-T06): modelo Whisper carregado lazy na primeira transcricao.
         .manage(audio::stt::SttState::default())
+        // Estado do spike de playback (M0-T08): playback Rust atual (rodio ou cpal).
+        .manage(audio::playback::PlaybackState::default())
         .setup(|app| {
             shortcut::init_clock();
             shortcut::register(app.handle());
@@ -60,7 +62,10 @@ fn main() {
             get_state,
             audio::stt::transcribe_last_capture,
             audio::tts_piper::synthesize_speech,
-            audio::tts_piper::read_synthesized_wav
+            audio::tts_piper::read_synthesized_wav,
+            audio::playback::play_wav_rust,
+            audio::playback::stop_playback,
+            audio::playback::spike_conflict_test
         ])
         .run(tauri::generate_context!())
         .expect("erro ao executar a aplicacao Tauri");
