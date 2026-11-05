@@ -59,14 +59,30 @@ impl PttState {
 /// Estado do spike de captura (M0-T05): a captura ativa durante o hold, se houver.
 /// `AudioCapture` e `Send + Sync` (so canal + JoinHandle; o `cpal::Stream` `!Send` fica na thread
 /// de audio), entao pode morar em `tauri::State`. Em M1 vira parte da FSM.
+///
+/// `Starting` cobre a corrida introduzida ao mover `AudioCapture::start()` para thread propria
+/// (ver comentario no handler de `Pressed`): se o usuario soltar o atalho ANTES de `start()`
+/// terminar, o `Released` marca `stop_requested=true` em vez de simplesmente nao achar nada para
+/// parar — a thread que esta iniciando ve a flag ao terminar e para a captura na hora, em vez de
+/// deixar o stream de audio "vazando" (gravando sem ninguem saber).
+#[derive(Default)]
+enum Capture {
+    #[default]
+    Idle,
+    Starting {
+        stop_requested: bool,
+    },
+    Active(AudioCapture),
+}
+
 #[derive(Default)]
 pub struct AudioState {
-    capture: Mutex<Option<AudioCapture>>,
+    inner: Mutex<Capture>,
 }
 
 impl AudioState {
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<AudioCapture>> {
-        self.capture.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock(&self) -> std::sync::MutexGuard<'_, Capture> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -160,16 +176,47 @@ fn handle_event<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut, event: Shor
                 warn!(error = %e, "falha ao emitir {EVENT_PRESSED}");
             }
 
-            // M0-T05: inicia a captura. Bloqueia ate o stream tocar; o custo e logado (`start_ms`)
-            // por ser relevante para a latencia percebida do PTT. Falha nao derruba o app.
+            // M0-T05: inicia a captura numa thread separada. ACHADO REAL (teste no Windows,
+            // 2026-11-05): `AudioCapture::start()` rodando direto no handler bloqueava o plugin de
+            // atalho - o `Released` nunca era processado (UI presa em "escutando"), porque o plugin
+            // despacha eventos sequencialmente nessa mesma thread. `start()` abre o device de audio
+            // (pode esperar permissao de microfone do SO, driver lento, etc.) e isso e tempo
+            // demais para segurar o handler. Mover para thread propria: o handler so dispara e
+            // retorna, o resultado chega via AudioState quando `start()` terminar.
+            *app.state::<AudioState>().lock() = Capture::Starting { stop_requested: false };
+            let app_handle = app.clone();
             let t = Instant::now();
-            match AudioCapture::start() {
-                Ok(capture) => {
-                    info!(start_ms = t.elapsed().as_secs_f64() * 1000.0, "captura de audio iniciada");
-                    *app.state::<AudioState>().lock() = Some(capture);
+            std::thread::spawn(move || {
+                let result = AudioCapture::start();
+                let audio_state = app_handle.state::<AudioState>();
+                let mut guard = audio_state.lock();
+                // Enquanto `start()` rodava, o Released pode ter chegado e marcado `stop_requested`
+                // (usuario soltou rapido demais). Nesse caso a captura acabou de nascer mas ja deve
+                // morrer, senao o audio ficaria gravando escondido sem ninguem para para-lo.
+                let stop_requested = matches!(*guard, Capture::Starting { stop_requested: true });
+                match result {
+                    Ok(capture) => {
+                        info!(
+                            start_ms = t.elapsed().as_secs_f64() * 1000.0,
+                            stop_requested,
+                            "captura de audio iniciada"
+                        );
+                        if stop_requested {
+                            *guard = Capture::Idle;
+                            drop(guard);
+                            if let Err(e) = capture.stop() {
+                                error!(error = %e, "falha ao finalizar captura (stop imediato pos-start)");
+                            }
+                        } else {
+                            *guard = Capture::Active(capture);
+                        }
+                    }
+                    Err(e) => {
+                        *guard = Capture::Idle;
+                        error!(error = %e, "falha ao iniciar captura de audio");
+                    }
                 }
-                Err(e) => error!(error = %e, "falha ao iniciar captura de audio"),
-            }
+            });
         }
         ShortcutState::Released => {
             let mut inner = state.lock();
@@ -190,23 +237,34 @@ fn handle_event<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut, event: Shor
                 warn!(error = %e, "falha ao emitir {EVENT_RELEASED}");
             }
 
-            // M0-T05: para a captura e grava o WAV (bloqueante: junta o consumidor e escreve em
-            // disco). Soltar o `AudioCapture` no fim encerra a thread de audio (Drop -> Shutdown).
-            let capture = app.state::<AudioState>().lock().take();
-            match capture {
-                Some(capture) => {
-                    let t = Instant::now();
-                    match capture.stop() {
-                        Ok(path) => info!(
-                            wav = %path.display(),
-                            stop_ms = t.elapsed().as_secs_f64() * 1000.0,
-                            hold_ms,
-                            "WAV gerado"
-                        ),
-                        Err(e) => error!(error = %e, "falha ao finalizar captura de audio"),
-                    }
+            // M0-T05: para a captura numa thread separada (mesmo motivo do Pressed: `stop()` e
+            // bloqueante - junta o consumidor e escreve o WAV em disco - e nao pode travar o
+            // handler do plugin de atalho).
+            let audio_state = app.state::<AudioState>();
+            let mut guard = audio_state.lock();
+            match std::mem::take(&mut *guard) {
+                Capture::Active(capture) => {
+                    drop(guard);
+                    std::thread::spawn(move || {
+                        let t = Instant::now();
+                        match capture.stop() {
+                            Ok(path) => info!(
+                                wav = %path.display(),
+                                stop_ms = t.elapsed().as_secs_f64() * 1000.0,
+                                hold_ms,
+                                "WAV gerado"
+                            ),
+                            Err(e) => error!(error = %e, "falha ao finalizar captura de audio"),
+                        }
+                    });
                 }
-                None => warn!("Released sem captura ativa (start falhou?)"),
+                Capture::Starting { .. } => {
+                    // `start()` ainda rodando: marca para a thread do Pressed parar assim que
+                    // terminar, em vez de deixar a captura vazando.
+                    *guard = Capture::Starting { stop_requested: true };
+                    warn!("Released durante o Starting da captura; stop agendado para quando iniciar");
+                }
+                Capture::Idle => warn!("Released sem captura ativa (start falhou ou ainda nao chamado?)"),
             }
         }
     }
