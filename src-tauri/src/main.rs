@@ -65,7 +65,10 @@ fn main() {
             audio::tts_piper::read_synthesized_wav,
             audio::playback::play_wav_rust,
             audio::playback::stop_playback,
-            audio::playback::spike_conflict_test
+            audio::playback::spike_conflict_test,
+            // Spike de IPC (M0-T10): emit x Channel (ver core/ipc_bench.rs).
+            brain::ipc_bench::start_emit_bench,
+            brain::ipc_bench::start_channel_bench
         ])
         .run(tauri::generate_context!())
         .expect("erro ao executar a aplicacao Tauri");

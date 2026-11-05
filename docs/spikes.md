@@ -374,3 +374,63 @@ Anotar tambem: GPU % por cenario; RAM da janela main sozinha; click-through OK/N
 - **NO-GO** caso contrario: considerar wgpu nativo sem webview para o orb (brainstorming secao 3), ou reduzir ainda mais o fps de idle. Antes do NO-GO por CPU/GPU, repetir com RAF encadeado por `setTimeout` e/ou WebGL cru para separar custo da janela do custo da tecnica de render.
 
 **Decisao:** ____ (data: ____)
+
+---
+
+## Spike IPC (M0-T10)
+
+**Status:** implementado, NAO compilado nem testado (escrito em WSL2 sem Rust nem browser). Medicoes pendentes no Windows (WebView2).
+
+Objetivo (plano M0-T10, brainstorming 2.2): decidir o transporte Rust -> Svelte para dados de alta frequencia (niveis de audio RMS/bandas que animam o orb no M1). `emit` serializa JSON via IPC e a 60+ Hz pode saturar e gerar jitter; `tauri::ipc::Channel` (streaming tipado) deveria ser mais barato. Benchmark SINTETICO e isolado: nao usa `audio/capture.rs`.
+
+### O que foi implementado
+
+- **`src-tauri/src/core/ipc_bench.rs`** (declarado em `core/mod.rs`, comandos registrados em `main.rs` via `brain::ipc_bench::*`):
+  - `start_emit_bench(app, hz, duration_secs)`: thread dedicada dispara `app.emit("bench-level", BenchPayload)` a `hz` Hz por `duration_secs` s.
+  - `start_channel_bench(app, channel: Channel<BenchPayload>, hz, duration_secs)`: mesmo laco e mesmo payload, via `channel.send`.
+  - `BenchPayload { seq: u64, value: f32, sent_at_ms: f64 }` (~ tamanho de um frame de nivel).
+  - Ambos retornam logo (`Result<(), String>`); o trabalho roda em `std::thread` (comandos sincronos). Um flag global impede dois benchmarks simultaneos.
+  - **Timing:** instantes fixos `start + n * periodo` (sem acumular deriva). Espera = `sleep` ate 2 ms antes do instante + spin com `yield_now`, para que a granularidade de timer do Windows nao vire jitter proprio. Custa CPU so durante o teste.
+  - **Medicao no Rust:** enviados vs esperados (`hz * duracao`), erros de envio, duracao real, **atraso maximo de agendamento** (se alto, o proprio Rust atrasou, nao o IPC) e custo medio/maximo da chamada `emit`/`send`. O resumo vai ao log (tracing) e ao frontend no evento `bench-done` (1 mensagem por execucao, nos dois transportes).
+- **`src/App.svelte`:** secao "Benchmark IPC (M0-T10)": Hz (10/30/60), duracao (5/10/20 s), botoes "Testar com emit" e "Testar com Channel". `emit` usa `listen("bench-level")`; Channel usa `new Channel()` + `onmessage` passado no `invoke`. Mede o intervalo entre mensagens com `performance.now()`; mostra recebidos/esperados, intervalo medio, **jitter = desvio padrao dos intervalos**, **jitter maximo = maior desvio absoluto do intervalo vs periodo nominal**, maior intervalo, latencia de entrega estimada (`timeOrigin + now - sent_at_ms`), mensagens fora de ordem, ultimos 10 intervalos, canvas plotando intervalos ao longo do tempo (linha cinza = nominal) e historico da sessao.
+- **Divergencia do plano:** o plano M0-T10 compara Channel a 30 Hz x `emit` a 60 Hz; o benchmark cobre TODAS as combinacoes (emit/Channel x 10/30/60 Hz), o que inclui essa comparacao. Payload e escalar (1 nivel), nao 8-16 bandas; se o resultado for marginal, repetir com um `Vec<f32>` de 16 elementos.
+- **Sem permissao nova** em `capabilities/default.json` (comandos proprios do app e `core:default` cobrem `invoke`/`listen`/Channel). Se o `invoke` falhar com "not allowed", conferir.
+
+### API a confirmar no `cargo build` (Windows)
+
+Escrito sem compilar. Pontos de risco por versao do Tauri 2.x:
+
+- `Channel<T>`: bound de `T` (`Serialize` / `IpcResponse`); assinatura de `send`; se `Channel` e `Clone + Send + 'static` (a thread o move).
+- JS: `new Channel()` de `@tauri-apps/api/core` e `channel.onmessage`; passado como chave `channel` do `invoke` (nome igual ao parametro Rust). Em versoes novas a ordem das mensagens e garantida pelo indice interno; conferir o campo `outOfOrder` (deve ser 0).
+- `use tauri::Emitter` para `AppHandle::emit` (como em `shortcut.rs`).
+- Parametros viram camelCase no JS (`durationSecs`).
+
+### Como testar no Windows
+
+1. `npm run tauri dev` (de preferencia tambem `npm run tauri dev -- --release` ou build release, porque dev tem overhead de HMR/devtools; anotar qual). Fechar o devtools durante a medicao.
+2. Na janela main, secao "Benchmark IPC". Para cada combinacao (emit/Channel x 10/30/60 Hz), duracao 10 s: clicar o botao, esperar terminar (nao mexer no mouse nem em outras janelas), anotar os numeros na tabela. Repetir ao menos 2x cada (a 1a execucao pode pagar custo de warm-up).
+3. Comparar tambem com a janela orb aberta e fechada (o `emit` faz broadcast para todas as janelas).
+4. Se "recebidos" < "enviados do Rust", ha perda no caminho IPC/WebView2; se "enviados" < esperados ou o "atraso max de agendamento" for alto, o gargalo e o Rust (timer/CPU), nao o transporte.
+
+### Resultados (preencher no Windows)
+
+Ambiente: SO/versao: ____ | CPU: ____ | Versao do WebView2: ____ | Dev ou release: ____ | Janela orb aberta: ____
+
+| Transporte | Hz alvo | Eventos recebidos/esperados | Jitter medio (ms) | Jitter maximo (ms) | Observacoes |
+|---|---|---|---|---|---|
+| emit | 10 | | | | |
+| emit | 30 | | | | |
+| emit | 60 | | | | |
+| Channel | 10 | | | | |
+| Channel | 30 | | | | |
+| Channel | 60 | | | | |
+
+"Jitter medio" = desvio padrao dos intervalos (mostrado como "jitter (desvio padrao)" na UI). Anotar nas observacoes: atraso max de agendamento no Rust, custo medio do envio, latencia de entrega media/max, fora de ordem.
+
+### Criterio de go/no-go
+
+- **GO para usar `emit`** se jitter medio < 5 ms em 30 Hz (frequencia alvo do M1 para os niveis de audio, brainstorming 2.2) e sem perda de eventos.
+- Se o jitter for alto ou houver perda de eventos em `emit` mas nao em Channel, **usar Channel no M1**.
+- **NO-GO geral** (ambos ruins) seria incomum; nesse caso considerar reduzir ainda mais a frequencia (15 Hz, interpolando no frontend) ou investigar o overhead do IPC do WebView2 (e o custo do JS por mensagem, ex.: `console.log`/render por evento).
+
+**Decisao:** ____ (data: ____)

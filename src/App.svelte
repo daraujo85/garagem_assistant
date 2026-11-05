@@ -1,5 +1,5 @@
 <script>
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke, Channel } from "@tauri-apps/api/core";
   import { listen, emit } from "@tauri-apps/api/event";
   import { Window } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
@@ -197,6 +197,137 @@
     }
   }
 
+  // Spike de IPC (M0-T10): emit x Channel (src-tauri/src/core/ipc_bench.rs). Benchmark sintetico,
+  // descartavel. Mede no JS o intervalo entre mensagens (`performance.now()` a cada recebimento);
+  // jitter = desvio padrao dos intervalos (e tambem o desvio maximo em relacao ao periodo nominal).
+  // brainstorming 2.2: a 60 Hz o `emit` (JSON via IPC) pode saturar; Channel seria mais barato.
+  let ipcHz = $state(30);
+  let ipcDuration = $state(5);
+  let ipcBusy = $state(false);
+  let ipcError = $state("");
+  let ipcRunning = $state("");
+  // Resultado da ultima execucao: { transport, hz, expected, received, ..., rust } ou null.
+  let ipcResult = $state(null);
+  // Historico das execucoes da sessao (para copiar na tabela de docs/spikes.md).
+  let ipcHistory = $state([]);
+  let ipcCanvas = $state(null);
+
+  function ipcStats(intervals, latencies, seqs, hz, expected, transport) {
+    const n = intervals.length;
+    const mean = n ? intervals.reduce((a, b) => a + b, 0) / n : 0;
+    const variance = n ? intervals.reduce((a, b) => a + (b - mean) ** 2, 0) / n : 0;
+    const nominal = 1000 / hz;
+    // Desvio maximo absoluto do intervalo em relacao ao periodo nominal.
+    const maxDev = n ? Math.max(...intervals.map((i) => Math.abs(i - nominal))) : 0;
+    const lat = latencies.length ? latencies.reduce((a, b) => a + b, 0) / latencies.length : 0;
+    let outOfOrder = 0;
+    for (let i = 1; i < seqs.length; i++) if (seqs[i] < seqs[i - 1]) outOfOrder++;
+    return {
+      transport,
+      hz,
+      expected,
+      received: seqs.length,
+      nominalMs: nominal,
+      meanIntervalMs: mean,
+      jitterStdMs: Math.sqrt(variance),
+      jitterMaxMs: maxDev,
+      maxIntervalMs: n ? Math.max(...intervals) : 0,
+      latMeanMs: lat,
+      latMaxMs: latencies.length ? Math.max(...latencies) : 0,
+      outOfOrder,
+      intervals,
+      rust: null,
+    };
+  }
+
+  function drawIpcPlot(r) {
+    const c = ipcCanvas;
+    if (!c || !r || r.intervals.length < 2) return;
+    const ctx = c.getContext("2d");
+    const w = c.width;
+    const h = c.height;
+    ctx.clearRect(0, 0, w, h);
+    // Escala vertical: 0 .. max(2x nominal, maior intervalo).
+    const top = Math.max(r.nominalMs * 2, r.maxIntervalMs) * 1.05;
+    const y = (v) => h - (v / top) * h;
+    ctx.strokeStyle = "#555a78";
+    ctx.beginPath();
+    ctx.moveTo(0, y(r.nominalMs));
+    ctx.lineTo(w, y(r.nominalMs));
+    ctx.stroke();
+    ctx.strokeStyle = "#6bd0ff";
+    ctx.beginPath();
+    r.intervals.forEach((v, i) => {
+      const x = (i / (r.intervals.length - 1)) * w;
+      if (i === 0) ctx.moveTo(x, y(v));
+      else ctx.lineTo(x, y(v));
+    });
+    ctx.stroke();
+  }
+
+  // `start` dispara o comando Rust; `wire` registra o recebimento (listen ou Channel) e devolve a
+  // funcao de cleanup. Ao fim (`bench-done` do Rust, com margem p/ mensagens em voo) calcula o resumo.
+  async function runIpcBench(transport) {
+    ipcBusy = true;
+    ipcError = "";
+    ipcResult = null;
+    ipcRunning = transport;
+    const hz = Number(ipcHz);
+    const dur = Number(ipcDuration);
+    const expected = hz * dur;
+    const intervals = [];
+    const latencies = [];
+    const seqs = [];
+    let last = null;
+    const onSample = (p) => {
+      const now = performance.now();
+      if (last !== null) intervals.push(now - last);
+      last = now;
+      seqs.push(p.seq);
+      // Latencia de entrega estimada: relogio de parede do JS - sent_at_ms do Rust (mesma maquina).
+      latencies.push(performance.timeOrigin + now - p.sent_at_ms);
+    };
+
+    let unlistenLevel = null;
+    let unlistenDone = null;
+    try {
+      let rust = null;
+      const done = new Promise((resolve) => {
+        listen("bench-done", (e) => {
+          rust = e.payload;
+          resolve();
+        }).then((u) => (unlistenDone = u));
+      });
+      if (transport === "emit") {
+        unlistenLevel = await listen("bench-level", (e) => onSample(e.payload));
+        await invoke("start_emit_bench", { hz, durationSecs: dur });
+      } else {
+        // API do Channel a confirmar na versao instalada (ver topo de ipc_bench.rs).
+        const channel = new Channel();
+        channel.onmessage = onSample;
+        await invoke("start_channel_bench", { channel, hz, durationSecs: dur });
+      }
+      // Timeout de seguranca: duracao + 5 s, caso o `bench-done` nao chegue.
+      await Promise.race([done, new Promise((r) => setTimeout(r, (dur + 5) * 1000))]);
+      // Margem para mensagens ainda em voo (o resumo vai por `emit`, outro caminho que o Channel).
+      await new Promise((r) => setTimeout(r, 500));
+
+      const result = ipcStats(intervals, latencies, seqs, hz, expected, transport);
+      result.rust = rust;
+      ipcResult = result;
+      ipcHistory = [...ipcHistory, result];
+      console.log("[ipc-bench]", { ...result, intervals: undefined }, "rust:", rust);
+      drawIpcPlot(result);
+    } catch (e) {
+      ipcError = String(e);
+    } finally {
+      if (unlistenLevel) unlistenLevel();
+      if (unlistenDone) unlistenDone();
+      ipcBusy = false;
+      ipcRunning = "";
+    }
+  }
+
   onMount(() => {
     // `listen` e async; guardamos as promises para desinscrever no cleanup (evita listener
     // duplicado com HMR do dev server).
@@ -363,6 +494,74 @@
     </p>
     {#if orbError}<p class="error">{orbError}</p>{/if}
   </section>
+
+  <section class="ipcbench">
+    <h3>Benchmark IPC (M0-T10)</h3>
+    <p>
+      Hz:
+      {#each [10, 30, 60] as f}
+        <button onclick={() => (ipcHz = f)} disabled={ipcBusy || ipcHz === f}>{f}</button>
+      {/each}
+      duracao (s):
+      <select bind:value={ipcDuration} disabled={ipcBusy}>
+        {#each [5, 10, 20] as d}
+          <option value={d}>{d}</option>
+        {/each}
+      </select>
+    </p>
+    <p>
+      <button onclick={() => runIpcBench("emit")} disabled={ipcBusy}>
+        {ipcRunning === "emit" ? "Rodando emit..." : "Testar com emit"}
+      </button>
+      <button onclick={() => runIpcBench("channel")} disabled={ipcBusy}>
+        {ipcRunning === "channel" ? "Rodando Channel..." : "Testar com Channel"}
+      </button>
+    </p>
+    <p class="counts">alvo: {ipcHz} Hz x {ipcDuration} s = {ipcHz * ipcDuration} eventos</p>
+    {#if ipcResult}
+      <p class="counts">
+        {ipcResult.transport} @ {ipcResult.hz} Hz | recebidos
+        <strong>{ipcResult.received}/{ipcResult.expected}</strong>
+        {#if ipcResult.outOfOrder > 0}| fora de ordem: {ipcResult.outOfOrder}{/if}
+      </p>
+      <p class="counts">
+        intervalo medio {ipcResult.meanIntervalMs.toFixed(2)} ms (nominal
+        {ipcResult.nominalMs.toFixed(2)}) | jitter (desvio padrao)
+        <strong>{ipcResult.jitterStdMs.toFixed(2)} ms</strong> | jitter maximo (desvio vs nominal)
+        <strong>{ipcResult.jitterMaxMs.toFixed(2)} ms</strong> | intervalo maximo
+        {ipcResult.maxIntervalMs.toFixed(2)} ms
+      </p>
+      <p class="counts">
+        latencia de entrega: media {ipcResult.latMeanMs.toFixed(2)} ms, max
+        {ipcResult.latMaxMs.toFixed(2)} ms
+      </p>
+      {#if ipcResult.rust}
+        <p class="counts">
+          Rust: enviados {ipcResult.rust.sent}/{ipcResult.rust.expected} (erros
+          {ipcResult.rust.send_errors}) | duracao {ipcResult.rust.elapsed_ms.toFixed(0)} ms | atraso
+          max de agendamento {ipcResult.rust.max_lag_ms.toFixed(2)} ms | custo do envio: medio
+          {ipcResult.rust.avg_send_ms.toFixed(3)} ms, max {ipcResult.rust.max_send_ms.toFixed(2)} ms
+        </p>
+      {:else}
+        <p class="counts">Resumo do Rust (bench-done) nao chegou.</p>
+      {/if}
+      <p class="counts">ultimos 10 intervalos (ms): {ipcResult.intervals.slice(-10).map((v) => v.toFixed(1)).join(", ")}</p>
+    {/if}
+    <!-- Intervalo entre mensagens ao longo do tempo; linha cinza = periodo nominal. -->
+    <canvas bind:this={ipcCanvas} width="360" height="60" class="ipcplot"></canvas>
+    {#if ipcHistory.length > 0}
+      <details>
+        <summary>Historico ({ipcHistory.length})</summary>
+        {#each ipcHistory as r}
+          <p class="counts">
+            {r.transport} | {r.hz} Hz | {r.received}/{r.expected} | jitter std
+            {r.jitterStdMs.toFixed(2)} / max {r.jitterMaxMs.toFixed(2)} ms
+          </p>
+        {/each}
+      </details>
+    {/if}
+    {#if ipcError}<p class="error">{ipcError}</p>{/if}
+  </section>
 </main>
 
 <style>
@@ -438,9 +637,32 @@
     border-radius: 4px;
     padding: 0.15rem 0.5rem;
   }
+  .ipcbench {
+    text-align: center;
+    font-size: 0.95rem;
+    max-width: 90%;
+  }
+  .ipcbench p {
+    margin: 0.35rem 0;
+  }
+  .ipcbench button,
+  .ipcbench select {
+    background: #1e1e2a;
+    color: #e6e6ee;
+    border: 1px solid #33334a;
+    border-radius: 4px;
+    padding: 0.15rem 0.5rem;
+  }
+  .ipcplot {
+    background: #1e1e2a;
+    border: 1px solid #33334a;
+    border-radius: 4px;
+    max-width: 100%;
+  }
   .tts h3,
   .playback h3,
-  .orbctl h3 {
+  .orbctl h3,
+  .ipcbench h3 {
     margin: 0 0 0.5rem;
     font-size: 0.9rem;
     opacity: 0.8;
