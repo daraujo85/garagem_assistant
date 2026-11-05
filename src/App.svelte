@@ -1,6 +1,7 @@
 <script>
   import { invoke } from "@tauri-apps/api/core";
-  import { listen } from "@tauri-apps/api/event";
+  import { listen, emit } from "@tauri-apps/api/event";
+  import { Window } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
   import OrbVisualizer from "./components/OrbVisualizer.svelte";
 
@@ -121,10 +122,88 @@
     }
   }
 
+  // Spike janela/orb (M0-T09): controle da janela "orb" (transparente, always-on-top; ver
+  // tauri.conf.json e OrbWindow.svelte). A janela main so manda config/comandos e mostra a telemetria
+  // de fps; CPU/RAM se medem no Gerenciador de Tarefas. Estado do orb FAKE (FSM real e do M1).
+  let orbFps = $state(60);
+  let orbPaused = $state(false);
+  let orbFakeState = $state("Idle");
+  let orbClickThrough = $state(false);
+  let orbVisible = $state(true);
+  let orbStats = $state(null);
+  let orbError = $state("");
+
+  function sendOrbConfig(patch) {
+    emit("orb-config", patch);
+  }
+  function setOrbFps(v) {
+    orbFps = v;
+    sendOrbConfig({ fps: v });
+  }
+  function toggleOrbPause() {
+    orbPaused = !orbPaused;
+    sendOrbConfig({ paused: orbPaused });
+  }
+  function setOrbFakeState(v) {
+    orbFakeState = v;
+    sendOrbConfig({ state: v });
+  }
+  async function orbWindow() {
+    const w = await Window.getByLabel("orb");
+    if (!w) throw new Error('janela "orb" nao encontrada (ver tauri.conf.json)');
+    return w;
+  }
+  // Click-through: com `true` o orb deixa de receber mouse (cliques passam para o app de baixo) e so
+  // este botao desliga. Ver docs/spikes.md (M0-T09).
+  async function toggleClickThrough() {
+    orbError = "";
+    try {
+      const next = !orbClickThrough;
+      await (await orbWindow()).setIgnoreCursorEvents(next);
+      orbClickThrough = next;
+    } catch (e) {
+      orbError = String(e);
+    }
+  }
+  // hide() = janela oculta de verdade (Page Visibility deve pausar o RAF). Alternativa a minimize().
+  async function toggleOrbVisible() {
+    orbError = "";
+    try {
+      const w = await orbWindow();
+      if (orbVisible) await w.hide();
+      else await w.show();
+      orbVisible = !orbVisible;
+    } catch (e) {
+      orbError = String(e);
+    }
+  }
+  async function minimizeOrb() {
+    orbError = "";
+    try {
+      await (await orbWindow()).minimize();
+    } catch (e) {
+      orbError = String(e);
+    }
+  }
+  async function restoreOrb() {
+    orbError = "";
+    try {
+      const w = await orbWindow();
+      await w.unminimize();
+      await w.show();
+      orbVisible = true;
+    } catch (e) {
+      orbError = String(e);
+    }
+  }
+
   onMount(() => {
     // `listen` e async; guardamos as promises para desinscrever no cleanup (evita listener
     // duplicado com HMR do dev server).
     const unlistenPromises = [
+      listen("orb-stats", (event) => {
+        orbStats = event.payload;
+      }),
       listen("shortcut-pressed", (event) => {
         ptt = "escutando";
         pressedCount += 1;
@@ -153,7 +232,8 @@
 </script>
 
 <main>
-  <OrbVisualizer state={orbState} />
+  <!-- animate=false: o orb animado de verdade vive na janela "orb" (M0-T09); aqui so 1 frame estatico, para nao poluir a medicao. -->
+  <OrbVisualizer state={orbState} animate={false} />
   <p class="state">Estado: {state}</p>
   <section class="ptt">
     <p>PTT (Ctrl+Shift+Space): <strong>{ptt}</strong></p>
@@ -244,6 +324,45 @@
     {/if}
     {#if pbError}<p class="error">{pbError}</p>{/if}
   </section>
+
+  <section class="orbctl">
+    <h3>Janela/Orb (M0-T09)</h3>
+    <p>
+      fps:
+      {#each [60, 30, 15] as f}
+        <button onclick={() => setOrbFps(f)} disabled={orbFps === f}>{f}</button>
+      {/each}
+      <button onclick={toggleOrbPause}>{orbPaused ? "Retomar RAF" : "Pausar RAF"}</button>
+    </p>
+    <p>
+      estado fake:
+      <select value={orbFakeState} onchange={(e) => setOrbFakeState(e.currentTarget.value)}>
+        {#each ["Idle", "Listening", "Thinking", "Speaking", "Error"] as s}
+          <option value={s}>{s}</option>
+        {/each}
+      </select>
+    </p>
+    <p>
+      <button onclick={toggleClickThrough}>
+        Click-through: {orbClickThrough ? "LIGADO (desligar)" : "desligado (ligar)"}
+      </button>
+    </p>
+    <p>
+      <button onclick={toggleOrbVisible}>{orbVisible ? "Ocultar orb (hide)" : "Mostrar orb"}</button>
+      <button onclick={minimizeOrb}>Minimizar</button>
+      <button onclick={restoreOrb}>Restaurar</button>
+    </p>
+    <p class="counts">
+      alvo: {orbFps} fps{orbPaused ? " (RAF pausado)" : ""} |
+      {#if orbStats}
+        medido: {orbStats.fps} fps | rodando: {orbStats.running ? "sim" : "nao"} | document.hidden:
+        {orbStats.hidden ? "sim" : "nao"}
+      {:else}
+        sem telemetria do orb ainda
+      {/if}
+    </p>
+    {#if orbError}<p class="error">{orbError}</p>{/if}
+  </section>
 </main>
 
 <style>
@@ -303,8 +422,25 @@
     border-radius: 4px;
     padding: 0.15rem 0.3rem;
   }
+  .orbctl {
+    text-align: center;
+    font-size: 0.95rem;
+    max-width: 90%;
+  }
+  .orbctl p {
+    margin: 0.35rem 0;
+  }
+  .orbctl button,
+  .orbctl select {
+    background: #1e1e2a;
+    color: #e6e6ee;
+    border: 1px solid #33334a;
+    border-radius: 4px;
+    padding: 0.15rem 0.5rem;
+  }
   .tts h3,
-  .playback h3 {
+  .playback h3,
+  .orbctl h3 {
     margin: 0 0 0.5rem;
     font-size: 0.9rem;
     opacity: 0.8;

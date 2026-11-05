@@ -20,6 +20,24 @@
         "decorations": true,
         "transparent": false,
         "alwaysOnTop": false
+      },
+      {
+        "label": "orb",
+        "title": "GaragemAssistant Orb",
+        "url": "index.html",
+        "width": 200,
+        "height": 200,
+        "x": 40,
+        "y": 40,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "focus": false
       }
     ],
     "security": {

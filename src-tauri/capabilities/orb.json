@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "orb",
+  "description": "Permissoes da janela do orb (M0-T09): eventos de controle/telemetria e arrastar pela area do orb",
+  "windows": ["orb"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging"
+  ]
+}

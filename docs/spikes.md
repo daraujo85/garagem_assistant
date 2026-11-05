@@ -304,3 +304,73 @@ Para o campo "Stop latency", anotar min/mediana/max e o ponto do audio onde foi 
 - **NO-GO** caso contrario: investigar buffer size do cpal/WASAPI, device unico compartilhado por in e out, ou outro backend de saida.
 
 **Decisao:** ____ (data: ____)
+
+---
+
+## Spike Janela/Orb (M0-T09)
+
+**Status:** implementado, NAO compilado nem testado (escrito em WSL2 sem Rust nem browser). Medicoes pendentes no Windows (WebView2).
+
+Objetivo (plano M0-T09, brainstorming 2.2): responder com dados reais se um orb flutuante (janela transparente, sem borda, always-on-top, com canvas animado) cabe no orcamento de CPU/RAM do assistente em idle, e se click-through funciona. Risco: WebView2 com transparencia e GPU tem bugs e custo de memoria (~100-200 MB); "~0% CPU em repouso" e otimista com animacao ativa.
+
+### O que foi implementado
+
+- **Janela "orb"** em `src-tauri/tauri.conf.json` (200x200, fixa, x/y 40/40): `transparent: true`, `decorations: false`, `alwaysOnTop: true`, `skipTaskbar: true`, `resizable: false`, `shadow: false`, `focus: false`. `skipTaskbar` foi escolha minha: um orb flutuante nao deve ocupar a barra de tarefas; contra: sem icone na barra, so da para fecha-lo pelo Gerenciador de Tarefas ou fechando a janela main. `shadow: false` porque no Windows a sombra da janela sem borda aparece como retangulo em volta do orb transparente.
+- **Janela "main"** (480x520, decorada) mantida intacta com todas as secoes de spikes anteriores. Ganhou a secao "Janela/Orb (M0-T09)" (controles do orb) em `src/App.svelte`.
+- **Decisao: DUAS janelas no mesmo `tauri.conf.json`** (e nao janela unica). Motivos: (1) o Tauri 2 suporta varias janelas no config sem codigo Rust; (2) `transparent`/`decorations`/`alwaysOnTop` sao por janela, e a janela unica transparente 160x160 esconderia os controles de debug dos spikes anteriores; (3) e o formato real do produto (orb flutuante + janela de config/historico no M2+); (4) permite medir o custo do orb isolado e o da janela main separado. Custo: segundo webview (RAM extra de ~um WebView2 por janela, que pode aparecer como processos `msedgewebview2.exe` separados). **Para medir o orb isolado, minimizar/ocultar a janela main (ela pausa ou nao tem animacao propria: `animate={false}`), ou comparar com e sem ela aberta.**
+- **Mesmo frontend nas duas janelas:** `src/main.js` le `getCurrentWindow().label` e monta `OrbWindow.svelte` (label `orb`) ou `App.svelte` (demais). Import dinamico para o CSS global opaco do App nao vazar para a janela transparente. Fora do Tauri (browser comum) cai no App.
+- **`src/components/OrbVisualizer.svelte`** (stub em CSS substituido): `<canvas>` Canvas2D com gradiente radial pulsante (raio e alpha por seno do tempo absoluto, nao por contagem de frames, entao a velocidade visual e igual em 60/30/15 fps). Props: `state` (so cor/periodo, estado FAKE), `fps`, `paused`, `animate`, `size`, `onstats`.
+  - **Canvas2D x WebGL:** escolhi Canvas2D (opcao simples permitida pelo plano) porque o M0 mede custo de JANELA, nao da tecnica. Sem Three.js (brainstorming 2.2). Se o Canvas2D nao performar, ou o M1 precisar de efeitos (ruido, bandas FFT), migrar para fragment shader WebGL cru (~100 linhas). Se o custo de GPU/compositor ficar proximo do limite, repetir a medicao com WebGL antes de decidir o NO-GO.
+  - **Controle de fps:** frame skip sobre o RAF (`t - last < 1000/fps - 2` ms pula o draw). O callback do RAF ainda acorda a ~60 Hz; so o desenho e pulado. Se isso pesar no CPU a 15 fps, trocar por RAF encadeado com `setTimeout` (anotar nas observacoes). Telemetria de fps real medido a cada 1 s.
+  - **Pause por Page Visibility:** listener de `visibilitychange`; com `document.hidden` o RAF e cancelado (cleanup do `$effect`) e o orb desenha 1 frame estatico. Volta sozinho ao ficar visivel. Tambem ha pausa manual (`paused`) para comparar mesmo sem o evento disparar.
+  - `devicePixelRatio` limitado a 2 no backing store.
+- **`src/OrbWindow.svelte`:** raiz da janela orb, fundo `transparent` (html/body), `data-tauri-drag-region` para arrastar. Escuta o evento `orb-config` (`{ fps, paused, state }`) vindo da main e emite `orb-stats` (1 Hz). Aceita `?fps=30&state=Idle` na query da URL, mas como a janela vem do `tauri.conf.json` sem query, o uso normal e pelos botoes da main (se quiser fixar, mude `"url"` da janela orb para `"index.html?fps=30"`).
+- **Click-through:** botao na main chama `Window.getByLabel("orb").setIgnoreCursorEvents(true|false)` (API JS do Tauri 2, sem codigo Rust). Permissao `core:window:allow-set-ignore-cursor-events` em `capabilities/default.json` (a chamada parte da janela main). Com click-through ligado o orb nao recebe mouse (inclusive arrastar); desligar so pelo botao da main.
+- **Capabilities:** `capabilities/default.json` (main) ganhou show/hide/minimize/unminimize/set-ignore-cursor-events; novo `capabilities/orb.json` (janela orb) com `core:default` + `core:window:allow-start-dragging`.
+- **Sem codigo Rust novo.** Nenhum comando Tauri foi criado: tudo via API JS de janela e eventos. A medicao de CPU/GPU/RAM e manual (Gerenciador de Tarefas), pois nao ha como o app medir o proprio WebView2 com precisao.
+- **Fora de escopo (M1):** FSM real, niveis de audio/RMS no orb, shader WebGL.
+
+### Como testar no Windows
+
+1. `npm run tauri dev`. Devem abrir duas janelas: a main (480x520) e o orb (200x200, sem borda, sobre todas as outras, cantinho superior esquerdo).
+2. Conferir visualmente: fundo do orb REALMENTE transparente (sem retangulo preto/branco/cinza em volta, sem sombra), orb pulsando, janela fica acima de outras apps, nao aparece na barra de tarefas. Arrastar o orb com o mouse move a janela.
+3. Gerenciador de Tarefas (`Ctrl+Shift+Esc`) -> aba Detalhes. Habilitar colunas: CPU, Memoria (conjunto de trabalho privado), GPU, Mecanismo de GPU. Observar `garagem-assistant.exe` e TODOS os `msedgewebview2.exe` filhos (somar; ver qual e o do orb: Processos > expandir o app, ou ordenar por GPU). Anotar tambem o total do app.
+4. Para isolar o orb: **minimizar a janela main** (a animacao dela e estatica, mas o webview dela existe) e deixar o orb parado, sem mexer no mouse. Nao deixar o Gerenciador de Tarefas no mesmo monitor sob o orb se isso causar redesenho; observar 30 s por cenario e anotar CPU % medio (olhar varias amostras, o valor oscila) e RAM.
+5. Cenarios (botoes da secao "Janela/Orb" na main; conferir "medido: N fps" na UI):
+   - 60 fps
+   - 30 fps
+   - 15 fps
+   - RAF pausado (botao "Pausar RAF")
+   - Janela oculta/minimizada: botao "Ocultar orb (hide)" e tambem "Minimizar". Verificar na UI da main que `document.hidden: sim` e `rodando: nao`. **Se `document.hidden` NAO virar `true` no WebView2 com `hide()`/minimizar, anotar: o pause via Page Visibility nao e confiavel nesse caso e o M1 precisa pausar explicitamente por evento do Rust (ex.: emitir `orb-config { paused: true }` ao ocultar).**
+6. Repetir o cenario 15 fps com a janela main FECHADA/ausente se possivel (comparar o custo do segundo webview).
+
+### Teste de click-through
+
+1. Posicionar o orb sobre outro app (ex.: bloco de notas ou desktop com icones; arrastar o orb pelo corpo).
+2. Click-through DESLIGADO: clicar sobre o orb. Esperado: o clique NAO passa (o orb recebe; arrastar funciona).
+3. Na janela main, clicar "Click-through: desligado (ligar)". Agora clicar no mesmo ponto sobre o orb. Esperado: o clique PASSA para o app/icone de baixo (ex.: foca o bloco de notas, abre o icone) e o orb nao arrasta mais.
+4. Anotar tambem: clicar na parte TRANSPARENTE da janela (fora do circulo) com click-through desligado: no Windows a area transparente de janela WebView2 costuma capturar cliques (retangulo 200x200 inteiro). Isso e o motivo de o click-through completo ser relevante; hit-test por pixel/regiao seria trabalho do M1+.
+5. Verificar que desligar pelo botao da main funciona (a main continua clicavel, pois e outra janela).
+
+### Resultados (preencher no Windows)
+
+Ambiente: SO/versao: ____ | GPU/driver: ____ | Versao do WebView2: ____ | Monitor (Hz / escala DPI): ____ | Modo dev ou release: ____
+
+Medir com a main minimizada. CPU % = media de ~30 s (soma do app + msedgewebview2 do orb). RAM = soma do app + webviews.
+
+| FPS | CPU % (medio) | RAM (MB) | Observacoes (jitter visual, tearing, transparencia, GPU %) |
+|---|---|---|---|
+| 60 | | | |
+| 30 | | | |
+| 15 | | | |
+| RAF pausado | | | |
+| Janela oculta/minimizada (Page Visibility) | | | |
+
+Anotar tambem: GPU % por cenario; RAM da janela main sozinha; click-through OK/NAO; transparencia OK (sem retangulo/artefato) sim/NAO; `document.hidden` mudou ao ocultar/minimizar sim/NAO.
+
+### Criterio de go/no-go
+
+- **GO** se CPU < 2% e RAM < 250 MB com fps reduzido (15-30) ou RAF pausado em Idle (brainstorming 2.2, plano M0 DoD), E transparencia sem artefatos, E click-through funcionando.
+- **NO-GO** caso contrario: considerar wgpu nativo sem webview para o orb (brainstorming secao 3), ou reduzir ainda mais o fps de idle. Antes do NO-GO por CPU/GPU, repetir com RAF encadeado por `setTimeout` e/ou WebGL cru para separar custo da janela do custo da tecnica de render.
+
+**Decisao:** ____ (data: ____)
