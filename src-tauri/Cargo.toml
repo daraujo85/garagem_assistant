@@ -37,6 +37,11 @@ cpal = "0.15"
 ringbuf = "0.4"
 # Divergencia: rodio 0.20 (em vez de 0.17 do doc). Para tocar o PCM do Piper.
 rodio = "0.20"
+# Resample do device (44.1/48 kHz) para 16 kHz mono: o Whisper exige 16 kHz mono (brainstorming 2.1,
+# plano M0-T05). Pinado em 0.16 (API `FftFixedIn::process`); a 1.x mudou a API (audioadapter).
+rubato = "0.16"
+# Escrita do WAV (16-bit PCM, 16 kHz, mono) do spike de captura M0-T05. Crate leve, sem deps nativas.
+hound = "3.5"
 
 # Motor de personalidade (templates)
 # Divergencia: minijinja 2.x (em vez de 1.0 do doc).

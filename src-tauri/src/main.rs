@@ -4,6 +4,7 @@
 // Modulos conforme arquitetura_garagemassistant.md secao 2. Todos stubs no M0-T01.
 // A pasta e `core/` (fiel a arquitetura), mas o modulo se chama `brain` via #[path]: um
 // `mod core` na raiz sombrearia o crate `core` da std e pode gerar ambiguidade de paths.
+// Spike de captura (M0-T05) usado pelo shortcut.rs; tts_piper segue stub.
 #[allow(dead_code)]
 mod audio;
 #[allow(dead_code)]
@@ -43,8 +44,10 @@ fn main() {
     tauri::Builder::default()
         // Plugin com handler Pressed/Released (M0-T03). O atalho em si e registrado no `setup`.
         .plugin(shortcut::plugin())
-        // Estado do spike PTT: so o timestamp do Pressed (sem audio; ver shortcut.rs).
+        // Estado do spike PTT: o timestamp do Pressed (ver shortcut.rs).
         .manage(shortcut::PttState::default())
+        // Estado do spike de captura (M0-T05): AudioCapture ativo durante o hold.
+        .manage(shortcut::AudioState::default())
         .setup(|app| {
             shortcut::init_clock();
             shortcut::register(app.handle());

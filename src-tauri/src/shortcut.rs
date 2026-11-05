@@ -1,6 +1,7 @@
 // Spike PTT (M0-T03): atalho global com Pressed/Released. Codigo de spike, descartavel exceto as
-// medicoes (ver docs/spikes.md). NAO ha audio aqui: so timestamps, logs e eventos para o frontend.
-// A thread dedicada de captura (cpal::Stream e !Send, brainstorming 2.1) e tarefa do M0-T05/M1.
+// medicoes (ver docs/spikes.md). Timestamps, logs e eventos para o frontend.
+// M0-T05: Pressed/Released tambem disparam `AudioCapture::start`/`stop` (ver audio/capture.rs; a
+// thread dedicada do cpal::Stream, `!Send`, vive la). So para o spike: a FSM de verdade e M1.
 // Em M1 esses eventos viram `ShortcutPressed`/`ShortcutReleased` na FSM (ator unico dono do estado).
 
 use std::sync::{Mutex, OnceLock};
@@ -10,6 +11,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutEvent, ShortcutState};
 use tracing::{error, info, warn};
+
+use crate::audio::capture::AudioCapture;
 
 /// Atalho do push-to-talk. M2: via preferences.
 /// Formato aceito por `Shortcut::from_str` (modificadores + tecla, separados por `+`).
@@ -39,6 +42,20 @@ impl PttState {
     fn lock(&self) -> std::sync::MutexGuard<'_, PttInner> {
         // Poison so ocorre se outra thread deu panic com o lock; para um timestamp, seguir adiante.
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Estado do spike de captura (M0-T05): a captura ativa durante o hold, se houver.
+/// `AudioCapture` e `Send + Sync` (so canal + JoinHandle; o `cpal::Stream` `!Send` fica na thread
+/// de audio), entao pode morar em `tauri::State`. Em M1 vira parte da FSM.
+#[derive(Default)]
+pub struct AudioState {
+    capture: Mutex<Option<AudioCapture>>,
+}
+
+impl AudioState {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<AudioCapture>> {
+        self.capture.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -128,6 +145,17 @@ fn handle_event<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut, event: Shor
             if let Err(e) = app.emit(EVENT_PRESSED, PressedPayload { unix_ms: unix_ms() }) {
                 warn!(error = %e, "falha ao emitir {EVENT_PRESSED}");
             }
+
+            // M0-T05: inicia a captura. Bloqueia ate o stream tocar; o custo e logado (`start_ms`)
+            // por ser relevante para a latencia percebida do PTT. Falha nao derruba o app.
+            let t = Instant::now();
+            match AudioCapture::start() {
+                Ok(capture) => {
+                    info!(start_ms = t.elapsed().as_secs_f64() * 1000.0, "captura de audio iniciada");
+                    *app.state::<AudioState>().lock() = Some(capture);
+                }
+                Err(e) => error!(error = %e, "falha ao iniciar captura de audio"),
+            }
         }
         ShortcutState::Released => {
             let mut inner = state.lock();
@@ -146,6 +174,25 @@ fn handle_event<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut, event: Shor
             let payload = ReleasedPayload { unix_ms: unix_ms(), hold_ms, repeats };
             if let Err(e) = app.emit(EVENT_RELEASED, payload) {
                 warn!(error = %e, "falha ao emitir {EVENT_RELEASED}");
+            }
+
+            // M0-T05: para a captura e grava o WAV (bloqueante: junta o consumidor e escreve em
+            // disco). Soltar o `AudioCapture` no fim encerra a thread de audio (Drop -> Shutdown).
+            let capture = app.state::<AudioState>().lock().take();
+            match capture {
+                Some(capture) => {
+                    let t = Instant::now();
+                    match capture.stop() {
+                        Ok(path) => info!(
+                            wav = %path.display(),
+                            stop_ms = t.elapsed().as_secs_f64() * 1000.0,
+                            hold_ms,
+                            "WAV gerado"
+                        ),
+                        Err(e) => error!(error = %e, "falha ao finalizar captura de audio"),
+                    }
+                }
+                None => warn!("Released sem captura ativa (start falhou?)"),
             }
         }
     }

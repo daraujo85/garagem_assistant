@@ -47,3 +47,8 @@ models/
 # Env e segredos
 .env
 .env.*
+
+# Capturas de audio do spike M0-T05 (src-tauri/captures no `tauri dev`). Ignorado tambem pelo
+# watcher do tauri dev: gravar um WAV ali nao pode reiniciar o app.
+captures/
+*.wav

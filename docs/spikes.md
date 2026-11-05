@@ -48,3 +48,52 @@ Ambiente: SO/versao: ____ | Teclado/layout: ____ | Versao de `tauri-plugin-globa
 - **NO-GO** caso contrario. Nesse caso, avaliar M0-T04 (plano B: hook de baixo nivel ou modo toggle).
 
 **Decisao:** ____ (data: ____)
+
+## Spike Captura de Audio (M0-T05)
+
+**Status:** implementado, NAO compilado nem testado (escrito em WSL2 sem Rust). Medicoes pendentes no Windows.
+
+### O que foi implementado
+
+- `src-tauri/src/audio/capture.rs` (substitui o stub): `AudioCapture::start()` / `.stop()` (ver brainstorming 2.1 e plano M0-T05).
+  - **Thread OS dedicada** (`audio-capture`) dona do `cpal::Stream` (`!Send`), comandada por `crossbeam-channel` com `Start`/`Stop`/`Shutdown`. `AudioCapture` so guarda o sender e o `JoinHandle`, entao e `Send + Sync` e pode morar em `tauri::State`. `Drop` envia `Shutdown` e junta a thread.
+  - **Callback do cpal sem alocacao e sem bloqueio:** converte o formato nativo (f32/i16/u16/i32) para f32 num buffer fixo de stack e faz `push_slice` num `ringbuf` SPSC (`HeapRb`, 4 s de folga). Se encher, descarta e incrementa um contador atomico (`dropped_samples`), sem nunca esperar.
+  - **Consumidor em thread propria** (`audio-consumer`): le o ringbuf (polling de 5 ms), faz downmix para mono (media simples dos canais), resample para 16 kHz com `rubato::FftFixedIn` (chunks de 1024 frames; cauda final com `process_partial`) e acumula em `Vec<f32>`. Device ja em 16 kHz pula o resample.
+  - **No `Stop`:** derruba o stream, drena o ringbuf, junta o consumidor e grava `./captures/capture_<unix_ms>.wav` (16-bit PCM, 16 kHz, mono, via `hound`). A pasta e criada se nao existir. `start_in(dir)` permite outro diretorio.
+  - **Logs (`tracing`):** device (nome, sample rate nativo, canais, formato), inicio, e no fim `wall_s` (relogio play->stop), `native_s` (frames recebidos / taxa nativa), `wav_s` (samples do WAV / 16000), contagem de frames/samples, `dropped_samples`, `peak` e `rms`. Warns para ringbuf estourado e audio silencioso.
+  - Erros tipados com `thiserror` (`AudioCaptureError`: sem device, config, formato nao suportado, stream, resampler, I/O, WAV, etc.).
+- `src-tauri/src/shortcut.rs`: `AudioState` (`Mutex<Option<AudioCapture>>`, similar ao `PttState`). No `Pressed` (primeiro, sem repeticao) chama `AudioCapture::start()`; no `Released` chama `.stop()` e loga o caminho do WAV (`stop_ms` e `hold_ms`).
+- `src-tauri/src/main.rs`: `.manage(shortcut::AudioState::default())`.
+- `src-tauri/Cargo.toml`: dependencias `rubato = "0.16"` e `hound = "3.5"`.
+- `.gitignore`: `captures/` e `*.wav` (tambem evita o watcher do `tauri dev` reiniciar o app ao gravar o WAV).
+- Fora de escopo (M1/M5): VAD, deteccao de silencio, FSM, escolha de device por preferences.
+
+### Como testar no Windows
+
+1. Na raiz do repo, no PowerShell: `$env:RUST_LOG="info"` e `npm run tauri dev`.
+2. Segurar `Ctrl+Shift+Space` falando algo por ~3 s e soltar.
+3. No terminal, conferir os logs `device de entrada escolhido` (nome, sample rate, canais), `captura iniciada` e `captura finalizada` (`wall_s`, `native_s`, `wav_s`, `dropped_samples`, `peak`).
+4. Conferir o arquivo em `src-tauri/captures/` (o cwd do `tauri dev` e `src-tauri/`; o caminho completo esta no log `WAV gerado`).
+5. Tocar o WAV e confirmar que o audio esta correto: sem distorcao, sem velocidade errada (acelerado/lento), sem corte no inicio/fim.
+6. Verificar formato do WAV (ex.: propriedades do arquivo ou `ffprobe`): 16 kHz, mono, 16-bit.
+7. Repetir para cada device/configuracao da tabela (mic a 44,1 kHz e 48 kHz, mono e estereo; trocar em Configuracoes de Som do Windows > Formato do dispositivo de entrada, e reiniciar o app, pois o device padrao e lido a cada `Start`).
+
+### Resultados (preencher no Windows)
+
+Ambiente: SO/versao: ____ | Versoes de `cpal` / `rubato` / `hound` resolvidas: ____
+
+| Device | Sample rate nativo | Canais | WAV gerado (sim/nao) | Duracao esperada vs duracao do WAV | Observacoes |
+|---|---|---|---|---|---|
+| | | | | | |
+| | | | | | |
+| | | | | | |
+| | | | | | |
+
+Observacoes a anotar: `start_ms` (custo de abrir o device no Pressed), `dropped_samples` (deve ser 0), `peak`/`rms`, e se algum formato (i16/i32) exigiu o caminho de conversao.
+
+### Criterio de go/no-go
+
+- **GO** se o WAV gerado tem a duracao esperada (+-10%), 16 kHz mono, e o audio soa sem distorcao/aceleracao/corte.
+- **NO-GO** caso contrario: revisar o resample ou o buffer sizing.
+
+**Decisao:** ____ (data: ____)
