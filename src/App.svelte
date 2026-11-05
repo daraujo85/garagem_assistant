@@ -412,7 +412,7 @@
 
 <main>
   <!-- animate=false: o orb animado de verdade vive na janela "orb" (M0-T09); aqui so 1 frame estatico, para nao poluir a medicao. -->
-  <OrbVisualizer state={orbState} animate={false} />
+  <OrbVisualizer assistantState={orbState} animate={false} />
   <p class="state">Estado: {state}</p>
   <section class="ptt">
     <p>PTT (Ctrl+Shift+Space): <strong>{ptt}</strong></p>

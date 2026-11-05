@@ -4,26 +4,58 @@ Registro dos spikes de risco do marco M0 (ver `docs/plano.md`). Codigo de spike 
 
 ## Consolidacao (M0-T12)
 
-Status em 2026-11-05: **todo o codigo dos 7 spikes abaixo foi escrito, mas nenhuma linha foi
-compilada ou executada**. O ambiente de desenvolvimento (WSL2 Linux) nao tem Rust/cargo instalado,
-e o SO-alvo real e o Windows. Isso significa que **nenhuma medicao real existe ainda** — todas as
-tabelas de resultados abaixo estao vazias, esperando serem preenchidas rodando `npm run tauri dev`
-no Windows.
+**Atualizado em 2026-11-05 (apos instalar Rust localmente).** Status anterior ("nada compilado")
+estava correto ate este ponto. Depois disso, Rust foi instalado no WSL2 (rustup, stable) + libs de
+sistema (`cmake`, `pkg-config`, `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `librsvg2-dev`,
+`libasound2-dev`, `libssl-dev`, `clang`, `libclang-dev`), e rodamos os comandos de verdade.
+
+### Resultado real: compila limpo em Linux
+
+| Comando | Resultado |
+|---|---|
+| `cargo check` | **Passou** apos corrigir 2 erros triviais (`f32`/`f64` mismatch em `playback.rs`) |
+| `cargo clippy -- -D warnings` | **Passou**, zero warnings |
+| `cargo build` (debug) | **Passou**, binario gerado (285MB debug, com symbols) |
+| `cargo test` | **4/4 testes passaram** (parser SSE do `llm_gateway.rs`) |
+| `npm install` | OK, 41 pacotes |
+| `npm run build` (Vite) | Passou apos corrigir 1 warning real do Svelte 5 (`store_rune_conflict`: prop `state` colidia com a rune `$state`, renomeado para `assistantState` em `OrbVisualizer.svelte`) |
+
+**Isso e muito mais forte do que "nao testado".** Das 7 dependencias de API "escritas de memoria"
+e marcadas como risco (tabela abaixo), **todas compilaram corretas de primeira**:
+`tauri-plugin-global-shortcut` v2, `rubato` 0.16, `whisper-rs` 0.13, `rodio` 0.20, `cpal` 0.15,
+`reqwest` 0.12, `tauri::ipc::Channel`. So 2 erros de tipo triviais apareceram, nada de API quebrada.
+
+### O que isso NAO valida (ainda precisa do Windows)
+
+Compilar em Linux com `webkit2gtk` (WRY/Tauri sao cross-platform na camada de build) nao testa:
+- **Runtime real**: abrir a janela, o atalho global disparar de fato, o mic capturar audio real,
+  o Piper/Whisper rodarem com modelos de verdade (nao baixamos nenhum modelo).
+- **APIs especificas do Windows**: `CREATE_NO_WINDOW` no playback/TTS, paths `.exe`, WASAPI
+  (exclusive mode, conflito rodio+cpal), `document.hidden` disparando em minimize do WebView2
+  (Windows), nomes de permissao exatos resolvidos pelo bundler do Tauri no Windows.
+- **Hardware**: GPU NVIDIA/CUDA para o Whisper, device de audio real, latencias de fato.
+
+Ou seja: a base de codigo e SOLIDA (compila, linka, passa clippy e testes), mas as 7 tabelas de
+resultados abaixo (uma por spike) continuam **vazias** e so podem ser preenchidas rodando
+`npm run tauri dev` no Windows com hardware real.
 
 ### O que foi escrito (resumo por spike)
 
-| Spike | Tarefa | O que faz | Dependencias de API nao verificadas |
+| Spike | Tarefa | O que faz | Compila? |
 |---|---|---|---|
-| PTT | M0-T03 | Handler Pressed/Released do atalho global (`Ctrl+Shift+Space`), timestamps, prova visual | `tauri-plugin-global-shortcut` v2 (`with_handler`, `event.state()`, comparacao de `Shortcut`) |
-| Captura de audio | M0-T05 | Thread dedicada (`cpal::Stream` e `!Send`), ringbuf SPSC, resample 16kHz mono (`rubato`), grava WAV (`hound`) | `rubato::FftFixedIn` (API 0.16), `ringbuf::traits` |
-| STT | M0-T06 | Transcricao PT-BR em lote com `whisper-rs`, idioma forcado, initial_prompt tecnico, mede RTF | `whisper-rs` 0.13 (`create_state`, `full_n_segments`, getters de segmento mudaram em 0.14+) |
-| TTS | M0-T07 | Piper como sidecar (stdin texto -> WAV), nao binding Rust | Flags do binario Piper (rhasspy MIT vs piper1-gpl GPL podem divergir) |
-| Playback | M0-T08 | Dois backends (Rodio vs Cpal puro) comparados, mede stop_latency_ms (base do barge-in) | `rodio` 0.20 (`OutputStream::try_default`/`Sink::try_new` podem ter mudado pra `OutputStreamBuilder`) |
-| Janela/Orb | M0-T09 | Janela transparente separada (`orb`, 200x200, always-on-top, click-through), Canvas2D com controle de fps e pausa via Page Visibility | Nomes de permissao em `capabilities/orb.json`, se `document.hidden` dispara em `hide()`/minimize no WebView2 |
-| IPC | M0-T10 | Benchmark `emit` vs `tauri::ipc::Channel` em 10/30/60Hz, mede jitter | Bound de `Channel<T>` (`IpcResponse`), forma de passar o channel no `invoke` do JS |
-| Gateway | M0-T11 | Cliente HTTP/SSE pro 9router, **validado parcialmente com curl real** (ver abaixo) | `reqwest` 0.12 (`chunk()`, `no_proxy`) |
+| PTT | M0-T03 | Handler Pressed/Released do atalho global (`Ctrl+Shift+Space`), timestamps, prova visual | ✅ Sim |
+| Captura de audio | M0-T05 | Thread dedicada (`cpal::Stream` e `!Send`), ringbuf SPSC, resample 16kHz mono (`rubato`), grava WAV (`hound`) | ✅ Sim |
+| STT | M0-T06 | Transcricao PT-BR em lote com `whisper-rs`, idioma forcado, initial_prompt tecnico, mede RTF | ✅ Sim |
+| TTS | M0-T07 | Piper como sidecar (stdin texto -> WAV), nao binding Rust | ✅ Sim |
+| Playback | M0-T08 | Dois backends (Rodio vs Cpal puro) comparados, mede stop_latency_ms (base do barge-in) | ✅ Sim (apos fix f32/f64) |
+| Janela/Orb | M0-T09 | Janela transparente separada (`orb`, 200x200, always-on-top, click-through), Canvas2D com controle de fps e pausa via Page Visibility | ✅ Sim (apos fix Svelte rune) |
+| IPC | M0-T10 | Benchmark `emit` vs `tauri::ipc::Channel` em 10/30/60Hz, mede jitter | ✅ Sim |
+| Gateway | M0-T11 | Cliente HTTP/SSE pro 9router, **validado tambem com curl real** (ver abaixo) | ✅ Sim (+ 4 testes unitarios passando) |
 
-### Achado real (nao e so codigo nao testado)
+Pendente de validar no Windows em todos: comportamento de RUNTIME (abrir janela, atalho disparar,
+audio real, modelos reais) — "compila" != "funciona como esperado com hardware real".
+
+### Achado real (gateway, independente de compilar)
 
 O spike do gateway (M0-T11) incluiu testes `curl` reais contra o 9router rodando neste WSL2
 (mirrored networking), sem esperar pelo Windows:
@@ -36,18 +68,18 @@ O spike do gateway (M0-T11) incluiu testes `curl` reais contra o 9router rodando
   padrao, o que pesa em custo e latencia. Registrado como pendencia a investigar no M1 (qual
   combo/config usar para minimizar isso).
 
-Esse e o UNICO dado real de todo o M0 ate agora. Todo o resto depende do teste no Windows.
-
 ### Proximos passos (antes de considerar o M0 fechado)
 
-1. Rodar `npm install` e `npm run tauri dev` no Windows. Resolver os erros de `cargo build` que
-   aparecerem (lista de pontos de atencao por spike na tabela acima).
-2. Preencher as 7 tabelas de resultados abaixo (uma por spike).
-3. Para cada spike, aplicar o criterio de go/no-go documentado na propria secao.
-4. Baixar manualmente: modelo Whisper ggml (M0-T06), binario Piper + vozes PT-BR (M0-T07).
-5. Consolidar os 7 veredictos (GO/NO-GO) numa decisao unica: o M0 so fecha quando todos os
+1. ~~Rodar `cargo check`/`cargo build` e resolver erros de API~~ **Feito neste ambiente (Linux)**.
+   Falta so confirmar que compila igual no Windows (deve compilar: nao ha `#[cfg(windows)]`
+   divergente alem do path do binario do cpal/piper, ja tratado com `#[cfg(windows)]`).
+2. Rodar `npm run tauri dev` no Windows de fato, com janela, mic e hardware reais.
+3. Preencher as 7 tabelas de resultados abaixo (uma por spike) com medicoes reais.
+4. Para cada spike, aplicar o criterio de go/no-go documentado na propria secao.
+5. Baixar manualmente: modelo Whisper ggml (M0-T06), binario Piper + vozes PT-BR (M0-T07).
+6. Consolidar os 7 veredictos (GO/NO-GO) numa decisao unica: o M0 so fecha quando todos os
    componentes tiverem GO (ou um plano B aceito para os que derem NO-GO — ex: M0-T04 se o PTT falhar).
-6. So depois disso seguir para o M1 (loop de voz ponta a ponta) com confianca de que a base compila
+7. So depois disso seguir para o M1 (loop de voz ponta a ponta) com confianca de que a base compila
    e os numeros de latencia sao reais, nao estimados.
 
 ---

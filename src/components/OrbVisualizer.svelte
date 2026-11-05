@@ -5,14 +5,15 @@
   // transparencia + always-on-top), nao a tecnica de render. Se o Canvas2D nao performar, ou se o
   // M1 precisar de efeitos (ruido, bandas FFT), trocar por fragment shader WebGL cru (~100 linhas).
   // Props:
-  //   state   Idle/Listening/Thinking/Speaking/Error (so cor/velocidade; FSM real e do M1).
+  //   assistantState  Idle/Listening/Thinking/Speaking/Error (so cor/velocidade; FSM real e do M1).
+  //                   Nome evita colisao com a rune `$state` (store_rune_conflict do Svelte 5).
   //   fps     alvo de frames/s (60, 30, 15...). Implementado como frame skip sobre o RAF.
   //   paused  pausa forcada do RAF (simula "janela oculta" quando a Page Visibility nao dispara).
   //   animate false = desenha 1 frame estatico (usado na janela main, para nao poluir a medicao).
   //   size    lado do canvas em px CSS (a janela do orb e 200x200).
   //   onstats callback ~1 Hz com { fps, running, hidden } (fps medido de verdade).
   let {
-    state = "Idle",
+    assistantState = "Idle",
     fps = 60,
     paused = false,
     animate = true,
@@ -43,8 +44,8 @@
 
   function draw(tMs) {
     if (!ctx) return;
-    const color = colors[state] ?? "#555566";
-    const period = periods[state] ?? 3;
+    const color = colors[assistantState] ?? "#555566";
+    const period = periods[assistantState] ?? 3;
     // Pulso por tempo absoluto (nao por contagem de frames): a velocidade visual e a mesma a 60/30/15 fps.
     const pulse = 0.5 + 0.5 * Math.sin((tMs / 1000) * ((2 * Math.PI) / period));
     const c = size / 2;
@@ -79,13 +80,13 @@
     canvas.height = Math.round(size * dpr);
     ctx = canvas.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    // untrack: so `size` deve redimensionar o canvas (state/running tem efeito proprio abaixo).
+    // untrack: so `size` deve redimensionar o canvas (assistantState/running tem efeito proprio abaixo).
     untrack(() => draw(0));
   });
 
   // Quando parado (static, pausado ou oculto), redesenha 1 frame a cada mudanca de estado/cor.
   $effect(() => {
-    void state;
+    void assistantState;
     if (!running) untrack(() => draw(0));
   });
 

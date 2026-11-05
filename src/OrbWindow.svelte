@@ -31,7 +31,7 @@
 <!-- data-tauri-drag-region: arrastar a janela sem borda (requer core:window:allow-start-dragging).
      Nao funciona com click-through ligado (o clique passa para baixo, e o esperado). -->
 <div class="root" data-tauri-drag-region>
-  <OrbVisualizer {state} {fps} {paused} size={200} {onstats} />
+  <OrbVisualizer assistantState={state} {fps} {paused} size={200} {onstats} />
 </div>
 
 <style>

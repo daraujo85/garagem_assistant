@@ -53,7 +53,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Sample, SampleFormat, SizedSample};
+use cpal::{SampleFormat, SizedSample};
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use hound::{SampleFormat as HoundFormat, WavReader};
 use ringbuf::traits::{Consumer, Producer, Split};
@@ -929,7 +929,7 @@ fn run_conflict_test(path: &Path, backend_str: &str) -> Result<ConflictReport, S
     let playback_info = playback.as_ref().and_then(|(_, i)| i.clone());
 
     // 3. Janela de sobreposicao: duracao do WAV + folga de 500 ms com ambos ativos.
-    let wav_secs = wav_duration_secs(path).unwrap_or(2.0);
+    let wav_secs = wav_duration_secs(path).unwrap_or(2.0) as f64;
     let overlap = wav_secs + 0.5;
     thread::sleep(Duration::from_secs_f64(overlap.min(30.0)));
 
