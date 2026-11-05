@@ -328,6 +328,54 @@
     }
   }
 
+  // Spike do gateway (M0-T11): SSE ao 9router via comando Rust (core/llm_gateway.rs). As metricas
+  // (first token, total) sao medidas no Rust, sem o IPC no meio. `elapsedUi` e o round-trip visto pela
+  // UI, so para comparar. O botao "indisponivel" aponta para localhost:1 (brainstorming 2.8).
+  let gwPrompt = $state("responda em uma frase curta: qual é a capital do Brasil?");
+  let gwBusy = $state(false);
+  let gwResult = $state(null);
+  let gwError = $state("");
+  let gwElapsedUi = $state(null);
+  let gwHistory = $state([]);
+
+  async function runGateway(unavailable) {
+    gwBusy = true;
+    gwError = "";
+    gwResult = null;
+    gwElapsedUi = null;
+    const t0 = performance.now();
+    try {
+      const cmd = unavailable ? "test_llm_gateway_unavailable" : "test_llm_gateway";
+      gwResult = await invoke(cmd, { prompt: gwPrompt });
+      gwElapsedUi = performance.now() - t0;
+      gwHistory = [...gwHistory, gwResult];
+      console.log("[llm-gateway]", gwResult);
+    } catch (e) {
+      gwElapsedUi = performance.now() - t0;
+      gwError = String(e);
+    } finally {
+      gwBusy = false;
+    }
+  }
+
+  // p50/p95 do first token e do total sobre o historico (so chamadas OK). Nearest-rank.
+  function pct(values, p) {
+    if (values.length === 0) return null;
+    const v = [...values].sort((a, b) => a - b);
+    return v[Math.min(v.length - 1, Math.ceil((p / 100) * v.length) - 1)];
+  }
+  let gwStats = $derived.by(() => {
+    const ft = gwHistory.map((r) => r.first_token_ms).filter((v) => v !== null);
+    const tt = gwHistory.map((r) => r.total_ms);
+    return {
+      n: gwHistory.length,
+      ftP50: pct(ft, 50),
+      ftP95: pct(ft, 95),
+      totP50: pct(tt, 50),
+      totP95: pct(tt, 95),
+    };
+  });
+
   onMount(() => {
     // `listen` e async; guardamos as promises para desinscrever no cleanup (evita listener
     // duplicado com HMR do dev server).
@@ -562,6 +610,45 @@
     {/if}
     {#if ipcError}<p class="error">{ipcError}</p>{/if}
   </section>
+
+  <section class="gateway">
+    <h3>Benchmark Gateway (M0-T11)</h3>
+    <p>
+      <textarea bind:value={gwPrompt} rows="2" disabled={gwBusy}></textarea>
+    </p>
+    <p>
+      <button onclick={() => runGateway(false)} disabled={gwBusy}>
+        {gwBusy ? "Aguardando..." : "Testar gateway"}
+      </button>
+      <button onclick={() => runGateway(true)} disabled={gwBusy}>Testar gateway indisponível</button>
+      <button onclick={() => (gwHistory = [])} disabled={gwBusy || gwHistory.length === 0}>
+        Limpar histórico
+      </button>
+    </p>
+    {#if gwResult}
+      <p class="counts">
+        {gwResult.base_url} | combo {gwResult.combo} | modelo real: {gwResult.model ?? "?"}
+      </p>
+      <p class="counts">
+        first_token_ms:
+        <strong>{gwResult.first_token_ms !== null ? gwResult.first_token_ms.toFixed(0) : "sem texto"}</strong>
+        | total_ms: <strong>{gwResult.total_ms.toFixed(0)}</strong> | chunks: {gwResult.chunk_count}
+        | round-trip UI: {gwElapsedUi?.toFixed(0)} ms
+      </p>
+      <p class="gwresp">{gwResult.response}</p>
+    {/if}
+    {#if gwError}
+      <p class="error">{gwError}</p>
+      {#if gwElapsedUi !== null}<p class="counts">round-trip UI até o erro: {gwElapsedUi.toFixed(0)} ms</p>{/if}
+    {/if}
+    {#if gwStats.n > 0}
+      <p class="counts">
+        {gwStats.n} chamadas OK | first token p50 {gwStats.ftP50?.toFixed(0)} / p95
+        {gwStats.ftP95?.toFixed(0)} ms | total p50 {gwStats.totP50?.toFixed(0)} / p95
+        {gwStats.totP95?.toFixed(0)} ms
+      </p>
+    {/if}
+  </section>
 </main>
 
 <style>
@@ -653,6 +740,33 @@
     border-radius: 4px;
     padding: 0.15rem 0.5rem;
   }
+  .gateway {
+    text-align: center;
+    font-size: 0.95rem;
+    max-width: 90%;
+  }
+  .gateway p {
+    margin: 0.35rem 0;
+  }
+  .gateway button,
+  .gateway textarea {
+    background: #1e1e2a;
+    color: #e6e6ee;
+    border: 1px solid #33334a;
+    border-radius: 4px;
+    padding: 0.15rem 0.5rem;
+  }
+  .gateway textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: inherit;
+  }
+  .gwresp {
+    background: #1e1e2a;
+    border-radius: 4px;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.85rem;
+  }
   .ipcplot {
     background: #1e1e2a;
     border: 1px solid #33334a;
@@ -662,7 +776,8 @@
   .tts h3,
   .playback h3,
   .orbctl h3,
-  .ipcbench h3 {
+  .ipcbench h3,
+  .gateway h3 {
     margin: 0 0 0.5rem;
     font-size: 0.9rem;
     opacity: 0.8;

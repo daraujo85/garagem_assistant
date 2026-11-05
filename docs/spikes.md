@@ -434,3 +434,82 @@ Ambiente: SO/versao: ____ | CPU: ____ | Versao do WebView2: ____ | Dev ou releas
 - **NO-GO geral** (ambos ruins) seria incomum; nesse caso considerar reduzir ainda mais a frequencia (15 Hz, interpolando no frontend) ou investigar o overhead do IPC do WebView2 (e o custo do JS por mensagem, ex.: `console.log`/render por evento).
 
 **Decisao:** ____ (data: ____)
+
+
+## Spike Gateway (M0-T11)
+
+Objetivo (plano M0-T11, brainstorming 2.4 e 2.8): chamada SSE ao 9router (`localhost:20128`) com o combo padrao, medir first token (p50/p95 em 20 chamadas) e ver o comportamento com o gateway fora do ar. So conectividade e latencia; o roteamento/dispatcher segue em stub (D5/D6) e o `LlmGateway` final e o M1-T07.
+
+### Teste real de conectividade (curl, feito no WSL2 antes do codigo Rust)
+
+Ambiente: WSL2 com `networkingMode=mirrored` (`.wslconfig` do Windows), IP `192.168.31.231`. O 9router estava vivo em `localhost:20128` a partir do WSL2.
+
+| Chamada | Resultado |
+|---|---|
+| `GET /api/combos` sem token | `401 {"error":"Unauthorized"}` (servidor vivo, exige auth) |
+| `GET /v1/models` sem token, `-m 5` | sem resposta em 5 s (curl code 000). Inconclusivo: com token a mesma rota leva ~10,8 s, entao foi o timeout do curl, nao necessariamente auth |
+| `GET /api/combos` com `Authorization: Bearer $ANTHROPIC_AUTH_TOKEN` | 401 (o endpoint `/api/*` de gestao nao aceita esse token) |
+| `GET /v1/models` com Bearer | `200`, ~10,8 s (lista grande; combos aparecem com `owned_by: "combo"`, inclui `claude-tudao`) |
+| `POST /v1/chat/completions` combo `claude-tudao`, `stream:true`, Bearer | `200`, SSE OpenAI-compativel |
+| `x-api-key` em `/api/combos` | 401 |
+| `GET http://localhost:1/` | `curl` exit 7 (connection refused) em <1 ms |
+
+Achados:
+- **Auth obrigatoria**: a rota `/v1/*` exige `Authorization: Bearer <token>`. Sem token nao ha resposta util. O cliente le `GARAGEM_LLM_API_KEY` ou, como fallback, `ANTHROPIC_AUTH_TOKEN`. **Decisao pendente para o M1** (junto da D6): onde o app guarda o token (arquivo de config / keyring do Windows). Nao gravar em codigo.
+- Formato do SSE: `data: {...}` com `choices[0].delta.content`; 1o chunk so com `delta.role`, ultimo com `finish_reason` + `usage`. Nao apareceu `data: [DONE]` no fim do que foi capturado (o stream so fecha); o cliente trata `[DONE]` **e** EOF.
+- O campo `model` dos chunks traz o modelo real que o combo escolheu (ex.: `claude-sonnet-5` para `claude-tudao` neste teste), nao o nome do combo. A UI mostra isso.
+- `prompt_tokens` = 2052 para uma pergunta de 10 palavras: o gateway/combo injeta contexto (system prompt) grande. Relevante para custo/latencia (brainstorming 2.4). Investigar no M1.
+- Baseline com `curl` (5 chamadas, prompt "capital do Brasil", `claude-tudao`): primeiro byte 0,60-0,70 s, total 1,03-1,16 s. O "primeiro byte" do curl e o chunk de role; o first token real (1o delta com texto) e um pouco depois. Isso e so baseline de rede+gateway: **a medicao oficial e a do app**.
+- Gateway fora do ar (porta errada): connection refused instantaneo; falha rapida, sem espera.
+
+### O que foi implementado
+
+Escrito sem Rust no WSL2 (nao compilado):
+
+- `src-tauri/src/core/llm_gateway.rs`: `LlmGateway` (`base_url` default `http://localhost:20128`, `combo` default `claude-tudao`; env `GARAGEM_LLM_BASE_URL`, `GARAGEM_LLM_COMBO`, `GARAGEM_LLM_TIMEOUT_SECS` default 30 s, `GARAGEM_LLM_API_KEY`). `stream_completion(prompt)` faz POST `/v1/chat/completions` com `stream:true`, le o SSE por `Response::chunk()` com parser incremental de linhas `data:` (em bytes, tolera UTF-8 cortado entre chunks) e devolve `StreamReport` (`first_token_ms`, `total_ms`, `chunk_count`, texto, modelo real).
+- `LlmGatewayError` (thiserror): `Unreachable` (connection refused), `Timeout`, `HttpStatus` (nao-200), `Parse` (SSE invalido), `StreamError` (erro dentro do stream), `Http` (resto). Testes unitarios do parser SSE (`cargo test`).
+- Comandos Tauri `test_llm_gateway(prompt)` e `test_llm_gateway_unavailable(prompt)` (aponta para `http://localhost:1`), ambos registrados em `main.rs`. Em erro, a mensagem inclui o tempo ate falhar.
+- `reqwest 0.12` (`default-features = false`, `json` + `stream`) no `Cargo.toml`; client com `no_proxy()` (evita o autoProxy do WSL/Windows interceptar localhost), `connect_timeout` 5 s e `timeout` total configuravel.
+- `src/App.svelte`: secao "Benchmark Gateway (M0-T11)" (prompt, "Testar gateway", "Testar gateway indisponivel", metricas, resposta, erro, p50/p95 acumulados do first token e total no historico da sessao).
+
+Decisao de tipagem: em vez de `impl Stream` (exigiria `futures`/`async-stream`), a versao simples coleta num `StreamReport`; o first token e medido no instante em que o 1o delta chega, entao a metrica e a mesma. O M1-T07 pode expor um stream de verdade (feature `stream` ja ligada, `bytes_stream()`).
+
+### API a confirmar no `cargo build` (Windows)
+
+- `reqwest` 0.12: `Response::chunk()`, `ClientBuilder::{connect_timeout, timeout, no_proxy}`, `RequestBuilder::bearer_auth`, `Error::{is_timeout, is_connect}`. Sem `default-features` nao ha TLS: `https://` falharia (so `http://localhost` e suportado; ok para o spike).
+- Se o closure `map_err` (captura `&self`) gerar conflito de borrow, trocar por chamadas diretas a `classify(...)`.
+- `trim_end_matches(['\r', '\n'])` (array de chars como Pattern) exige Rust >= 1.58; ok com rust-version 1.77.
+- `is_timeout()` pode ser `true` tambem para o timeout de conexao; a mensagem de `Timeout` cobre os dois casos.
+
+### Como testar no Windows
+
+1. **Confirmar que o 9router esta acessivel do Windows** (ponto de atencao): o WSL2 desta maquina usa `networkingMode=mirrored`, entao `localhost` deveria ser o mesmo nos dois lados. Em PowerShell: `curl.exe -s -m 5 -H "Authorization: Bearer $env:ANTHROPIC_AUTH_TOKEN" http://localhost:20128/v1/models` (esperado 200).
+   - Se falhar: (a) o 9router pode estar ligado so ao loopback do WSL2 (127.0.0.1 dentro da VM) e, sem mirrored (modo NAT), o Windows nao o alcanca. Pegar o IP com `ip addr` / `hostname -I` no WSL2 e testar `http://<ip-wsl2>:20128`; (b) o 9router tem que escutar em `0.0.0.0`, nao so `127.0.0.1`; (c) checar o firewall do Windows/Hyper-V (`firewall=true` no `.wslconfig`); (d) se o 9router rodar no proprio Windows, nada disso se aplica. Definir `GARAGEM_LLM_BASE_URL` com a URL que funcionar.
+2. Definir o token no ambiente do processo do app (PowerShell): `$env:GARAGEM_LLM_API_KEY = "<token>"` (ou `ANTHROPIC_AUTH_TOKEN`); opcional `$env:GARAGEM_LLM_BASE_URL`, `$env:GARAGEM_LLM_COMBO`. **Nao commitar o token.**
+3. `npm run tauri dev` (anotar dev ou release; para latencia de rede a diferenca e pequena).
+4. Secao "Benchmark Gateway (M0-T11)": com o prompt padrao, clicar "Testar gateway". Conferir resposta correta ("Brasilia"), first_token_ms, total_ms e modelo real.
+5. Clicar "Testar gateway indisponivel": esperado erro `gateway inacessivel em http://localhost:1 ...` e rapido (connection refused). Anotar o tempo ate falhar.
+6. Teste de timeout real (opcional): `GARAGEM_LLM_BASE_URL=http://10.255.255.1:20128` (IP sem resposta) e `GARAGEM_LLM_TIMEOUT_SECS=5`; esperado `timeout` em ~5 s. Teste de 401: rodar sem token, esperado `HTTP 401`.
+7. **20 chamadas**: clicar "Testar gateway" 20x (o historico da UI calcula p50/p95 do first token e do total); descartar e anotar a 1a se for muito mais lenta (cold start de conexao/combo). Repetir para outros combos mudando `GARAGEM_LLM_COMBO` (`claude-coder`, `claude-tools`, `claude-free`) e reiniciar o app. Para um loop sem UI, o equivalente em `curl` e `for i in $(seq 20); do curl -s -N -o /dev/null -w '%{time_starttransfer} %{time_total}\n' -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"model":"claude-tudao","messages":[{"role":"user","content":"responda em uma frase curta: qual e a capital do Brasil?"}],"stream":true}' http://localhost:20128/v1/chat/completions; done` (baseline sem o app).
+
+### Resultados (preencher no Windows)
+
+Ambiente: SO/versao: ____ | URL usada: ____ | Dev ou release: ____ | Rede WSL2: mirrored (confirmar) | Data: ____
+
+| Combo | First token (ms) | Total (ms) | Chunks | Resposta correta? | Observacoes |
+|---|---|---|---|---|---|
+| claude-tudao p50 (20 chamadas) | | | | | |
+| claude-tudao p95 (20 chamadas) | | | | | |
+| claude-coder p50 | | | | | |
+| claude-coder p95 | | | | | |
+| gateway indisponivel (localhost:1) | n/a | | n/a | n/a | tempo ate o erro: ____ |
+| sem token (401) | n/a | | n/a | n/a | |
+
+### Criterio de go/no-go
+
+- **GO** se o gateway responde de forma consistente (20/20 sem timeout) e o first token (p50 e p95) fica dentro do orcamento do M1 (300-1500 ms, brainstorming 2.4). Dado de partida do curl no WSL2: primeiro byte 0,6-0,7 s, dentro do orcamento, mas o first token real e a medir.
+- **NO-GO** se o gateway estiver inacessivel do Windows (resolver o networking WSL2<->Windows antes do M1: mirrored, bind em `0.0.0.0`, firewall, ou rodar o 9router no Windows) ou se a latencia for inviavel (p95 > 1500 ms: avaliar combo mais rapido, reduzir o contexto que o gateway injeta, ver o item de `prompt_tokens` acima).
+- Gateway fora do ar deve falhar rapido com erro claro (connection refused) e nao travar a UI; o app nao faz retry de provedor (D6: fallback e do combo).
+- Pendencias para o M1-T07: guarda do token (keyring/config), cancelamento (barge-in), timeout por estagio, stream real (`impl Stream`), hook de egress.
+
+**Decisao:** ____ (data: ____)

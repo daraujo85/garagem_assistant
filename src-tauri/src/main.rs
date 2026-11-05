@@ -68,7 +68,10 @@ fn main() {
             audio::playback::spike_conflict_test,
             // Spike de IPC (M0-T10): emit x Channel (ver core/ipc_bench.rs).
             brain::ipc_bench::start_emit_bench,
-            brain::ipc_bench::start_channel_bench
+            brain::ipc_bench::start_channel_bench,
+            // Spike do gateway (M0-T11): SSE ao 9router (ver core/llm_gateway.rs).
+            brain::llm_gateway::test_llm_gateway,
+            brain::llm_gateway::test_llm_gateway_unavailable
         ])
         .run(tauri::generate_context!())
         .expect("erro ao executar a aplicacao Tauri");
