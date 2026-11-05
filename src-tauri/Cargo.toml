@@ -1,0 +1,61 @@
+[package]
+name = "garagem-assistant"
+version = "0.1.0"
+description = "GaragemAssistant: assistente de voz desktop para desenvolvedores"
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Framework base
+# Divergencia do doc original: sem features = ["global-shortcut"]. No Tauri 2 isso e um plugin
+# separado (ver tauri-plugin-global-shortcut abaixo). Ver docs/brainstorming.md 2.1.
+tauri = { version = "2", features = [] }
+# Substitui a feature "global-shortcut" do crate tauri. Fornece ShortcutState::Pressed/Released
+# (base do push-to-talk). Ver docs/brainstorming.md 2.1 e plano M0-T03.
+tauri-plugin-global-shortcut = "2"
+
+# Divergencia: versao atual 1.x, "full" ja inclui tokio::process (substitui async-process).
+tokio = { version = "1", features = ["full"] }
+# async-process REMOVIDO: redundante com tokio::process e mistura reactors. Ver brainstorming 2.1.
+
+# Banco de dados e estado
+# Divergencia: rusqlite no lugar de sqlx (default D15 do plano: app desktop single-user, sem
+# necessidade de pool async). Chamadas via tokio::task::spawn_blocking no M2.
+# "bundled" compila o SQLite junto (inclui FTS5, usado no M3) e evita depender de lib do SO.
+# ATENCAO: rusqlite_migration precisa casar com a versao do rusqlite. Conferir no Windows.
+rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite_migration = "1.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Audio de baixa latencia
+cpal = "0.15"
+# Divergencia: ringbuf 0.4 (API nova, em vez de 0.3 do doc).
+ringbuf = "0.4"
+# Divergencia: rodio 0.20 (em vez de 0.17 do doc). Para tocar o PCM do Piper.
+rodio = "0.20"
+
+# Motor de personalidade (templates)
+# Divergencia: minijinja 2.x (em vez de 1.0 do doc).
+minijinja = "2"
+
+# Concorrencia e canais (fronteira thread de audio <-> tokio, ver brainstorming 2.1)
+crossbeam-channel = "0.5"
+
+# Adicionados (nao estavam no doc original)
+# Taxonomia de erros tipada (brainstorming, secao de erros).
+thiserror = "2"
+# Observabilidade com spans por estagio (brainstorming: "medir desde o dia 1").
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[profile.release]
+# Binario menor para distribuicao; nao afeta dev.
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
