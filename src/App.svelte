@@ -37,6 +37,32 @@
     }
   }
 
+  // Spike TTS (M0-T07): texto + botao "Falar" -> `synthesize_speech` (Piper sidecar) -> tag <audio>.
+  // Descartavel: em M1 o playback e em Rust (rodio/cpal, M0-T08) com streaming por frase.
+  let ttsText = $state("Olá, como posso ajudar?");
+  let ttsBusy = $state(false);
+  let ttsResult = $state(null);
+  let ttsError = $state("");
+  let audioUrl = $state(null);
+
+  async function speak() {
+    ttsBusy = true;
+    ttsError = "";
+    try {
+      const res = await invoke("synthesize_speech", { text: ttsText });
+      ttsResult = res;
+      // Busca os bytes do WAV e monta um blob URL para a tag <audio> (sem asset protocol).
+      const bytes = await invoke("read_synthesized_wav", { path: res.wav_path });
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      audioUrl = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+    } catch (e) {
+      ttsResult = null;
+      ttsError = String(e);
+    } finally {
+      ttsBusy = false;
+    }
+  }
+
   onMount(() => {
     // `listen` e async; guardamos as promises para desinscrever no cleanup (evita listener
     // duplicado com HMR do dev server).
@@ -95,6 +121,31 @@
     {#if sttError}<p class="error">{sttError}</p>{/if}
   </section>
   {#if error}<p class="error">{error}</p>{/if}
+  <section class="tts">
+    <h3>TTS (Piper sidecar)</h3>
+    <textarea
+      rows="3"
+      bind:value={ttsText}
+      placeholder="Texto para sintetizar..."
+      disabled={ttsBusy}
+    ></textarea>
+    <button onclick={speak} disabled={ttsBusy || !ttsText.trim()}>
+      {ttsBusy ? "Sintetizando..." : "Falar"}
+    </button>
+    {#if ttsResult}
+      <p class="counts">
+        {ttsResult.voice} | audio {ttsResult.audio_secs.toFixed(2)} s |
+        total {ttsResult.processing_ms} ms |
+        1o byte ~{ttsResult.first_output_ms === null ? "n/d" : `${ttsResult.first_output_ms} ms`} |
+        RTF {ttsResult.rtf.toFixed(2)} | {ttsResult.sample_rate} Hz
+      </p>
+    {/if}
+    {#if audioUrl}
+      <!-- Spikes tocam o WAV aqui; playback em Rust (rodio/cpal) e a tarefa M0-T08. -->
+      <audio controls src={audioUrl}></audio>
+    {/if}
+    {#if ttsError}<p class="error">{ttsError}</p>{/if}
+  </section>
 </main>
 
 <style>
@@ -136,6 +187,27 @@
   }
   .stt-text {
     margin: 0.5rem 0 0.25rem;
+  }
+  .tts {
+    text-align: center;
+    font-size: 0.95rem;
+    max-width: 90%;
+  }
+  .tts h3 {
+    margin: 0 0 0.5rem;
+    font-size: 0.9rem;
+    opacity: 0.8;
+  }
+  .tts textarea {
+    width: 100%;
+    box-sizing: border-box;
+    background: #1e1e2a;
+    color: #e6e6ee;
+    border: 1px solid #33334a;
+    border-radius: 6px;
+    padding: 0.5rem;
+    font: inherit;
+    margin-bottom: 0.5rem;
   }
   .error {
     color: #ff6b6b;

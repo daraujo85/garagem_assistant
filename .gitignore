@@ -38,6 +38,9 @@ src-tauri/gen/
 graphify-out/
 .grepai/
 
+# Binario sidecar do Piper (spike TTS M0-T07): baixado manualmente, nunca commitado
+tools/
+
 # Modelos de IA (Whisper, Piper, etc.): ficam em pasta local configuravel, nunca commitados
 models/
 *.gguf

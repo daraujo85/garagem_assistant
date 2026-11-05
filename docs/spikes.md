@@ -167,3 +167,76 @@ Ambiente: SO/versao: ____ | CPU: ____ | GPU: ____ | Versao resolvida de `whisper
 - **NO-GO** caso contrario: considerar modelo menor, GPU obrigatoria, ou alternativas como `sherpa-onnx` (ver brainstorming 2.3).
 
 **Decisao:** ____ (data: ____)
+## Spike TTS (M0-T07)
+
+Objetivo (plano M0-T07): Piper (binario sidecar) sintetizando PT-BR, medindo tempo ate o primeiro audio e ate o fim, por frase curta e por frase longa, comparando as vozes `faber` e `edresson` (brainstorming 2.9: vozes PT-BR existentes, qualidade mediana). Registrando a licenca (risco R-M0-3).
+
+### O que foi implementado
+
+- **Piper como processo externo (sidecar), nao binding Rust.** Nao ha binding Rust maduro (ao contrario do `whisper-rs`/whisper.cpp); `std::process`/`tokio::process` invocando o binario `piper` e a integracao mais robusta (brainstorming 2.9).
+- `src-tauri/src/audio/tts_piper.rs` (substitui o stub):
+  - `PiperTts::new(bin, voice)`: valida binario + voz (`<voz>.onnx` E `<voz>.onnx.json`); erro claro com onde baixar se faltar. `PiperTts::from_env()` le `GARAGEM_PIPER_BIN` (default `./tools/piper/piper.exe` no Windows) e `GARAGEM_PIPER_VOICE` (default `./models/voices/pt_BR-faber-medium.onnx`).
+  - `PiperTts::synthesize(&str)`: spawna `piper --model <voz>.onnx --output_file <saida>.wav`, escreve o texto no stdin (terminado em `\n`: uma linha = uma utterance), fecha o stdin (EOF dispara a sintese), espera o processo terminar e le a duracao no header do WAV com `hound`.
+  - Metricas em `SynthesisResult`: `processing_ms` (spawn ate o processo terminar, INCLUI a carga do modelo ONNX que no sidecar acontece a cada chamada), `first_output_ms` (APROXIMACAO por polling do arquivo a cada 5 ms), `audio_secs`, `sample_rate`, `rtf`, voz usada e caminho do WAV.
+  - `TtsError` (`thiserror`): `BinaryNotFound`, `VoiceNotFound`, `EmptyText`, `ProcessFailed` (com cauda do stderr), `Timeout` (60 s, mata o processo), `Io`, `Wav`. `kill_on_drop` evita processo orfao no timeout; stderr lido em task propria (pipe cheio = deadlock).
+  - Comando Tauri `synthesize_speech(text)`: `tokio::process::Command` com `await` (ESCOLHA DOCUMENTADA: o trabalho pesado roda no processo Piper, nao ha CPU-bound dentro do Rust, entao nao precisa de `spawn_blocking` — brainstorming 2.1). Comando `read_synthesized_wav(path)`: devolve os BYTES do WAV (`tauri::ipc::Response` binario, chega como `ArrayBuffer`) com checagem de que o caminho esta dentro de `./captures/tts/` (nao vira leitor generico de disco para o webview).
+  - WAVs de saida em `./captures/tts/` (a pasta `captures/` ja esta no `.gitignore` e fora do watcher do `tauri dev`; `latest_wav` do stt.rs nao e recursivo, entao nao colide com o spike STT).
+- `src/App.svelte`: campo de texto + botao "Falar" -> `synthesize_speech` -> blob URL -> tag `<audio>` HTML (playback em Rust e M0-T08, tarefa separada).
+- `src-tauri/src/main.rs`: comandos `synthesize_speech` e `read_synthesized_wav` no `invoke_handler`.
+- **Fora de escopo (M1):** streaming de PCM (`--output-raw`), processo Piper residente, fila de sintese/playback, quebra por frase.
+
+### Download manual (nada e baixado pelo app)
+
+**Binario do Piper (Windows):**
+
+| Fonte | Licenca | Observacao |
+|---|---|---|
+| <https://github.com/rhasspy/piper/releases> (`piper_windows_amd64.zip`) | MIT | Projeto original, arquivado; e o que as flags `--model`/`--output_file` deste spike assumem |
+| <https://github.com/OHF-Voice/piper1-gpl> (fork ativo) | **GPL** | Fork ativo; flags podem diferir (`--output-file`/`-f`); ajustar `build_args` em `tts_piper.rs` se usar este |
+
+Extrair em `src-tauri/tools/piper/` (pasta `tools/` no `.gitignore`).
+
+**Vozes PT-BR** (`.onnx` + `.onnx.json` — OS DOIS arquivos, o `.json` e obrigatorio):
+
+- <https://huggingface.co/rhasspy/piper-voices> (caminho `pt/pt_BR/<nome>/<qualidade>/`). Vozes comuns: `pt_BR-faber-medium` (padrao do spike) e `pt_BR-edresson-low`. Qualidade mediana (brainstorming 2.9).
+- Colocar em `src-tauri/models/voices/` (pasta `models/` e `*.onnx` no `.gitignore`).
+
+**Licenca (risco R-M0-3):** o Piper original (rhasspy) e MIT; o fork ativo (OHF-Piper/piper1-gpl) e GPL. Isso SO importa se houver distribuicao — decisao D2 do plano esta "Nao" (uso pessoal) mas segue em aberto ate M5/M6. **Decisao pendente:** se D2 mudar para distribuido, trocar para o binario MIT do rhasspy ou reavaliar alternativa (Kokoro/Supertonic, brainstorming 3). Nao linkar o binario do Piper no instalador enquanto D2 estiver aberta.
+
+### Frases de teste (PT-BR)
+
+Curtas:
+
+1. "Olá, como posso ajudar?"
+2. "Qual o status do git?"
+3. "Já anotei."
+4. "Ok, já vejo."
+
+Longas (2-3 linhas):
+
+5. "Fiz o merge da sua branch na main e o build passou sem erros. Os testes unitarios novos tambem rodaram. Quer que eu abra o pull request agora?"
+6. "Lembrei que voce prefere commits pequenos com mensagens em portugues. O ultimo commit quebrei os testes de integracao, entao reverti e deixei anotado no log para voce revisar depois do almoço."
+
+### Como testar no Windows
+
+1. Baixar o binario do Piper para `src-tauri/tools/piper/` e as vozes para `src-tauri/models/voices/` (secao acima; OS arquivos, `.onnx` + `.onnx.json`).
+2. Se usar o fork piper1-gpl e as flags divergirem, editar `build_args` em `tts_piper.rs`.
+3. `npm run tauri dev`.
+4. Digitar uma frase, clicar "Falar", ouvir o resultado pela tag `<audio>` e anotar: `total` (processing_ms), `1o byte` (aproximado), duracao do audio, RTF e a qualidade percebida (1-5). A PRIMEIRA chamada pode ser mais lenta (disco frio / antivirus); medir a partir da segunda.
+5. Comparar `pt_BR-faber-medium` com `pt_BR-edresson-low`: trocar a voz ou `$env:GARAGEM_PIPER_VOICE="./models/voices/pt_BR-edresson-low.onnx"` antes do `tauri dev`.
+6. Repetir com as frases curtas e longas acima (e uma frase sua, para nocao subjetiva de uso diario).
+
+### Resultados (preencher no Windows)
+
+Ambiente: SO/versao: ____ | CPU: ____ | Versao do binario Piper: ____ | Fonte (rhasspy/piper1-gpl): ____
+
+| Voz | Texto (curto/longo) | Tempo total (ms) | Duracao do audio gerado (s) | Qualidade percebida (1-5) | Observacoes |
+|---|---|---|---|---|---|
+| | | | | | |
+
+### Criterio de go/no-go
+
+- **GO** se tempo total < 500 ms para frases curtas (brainstorming 2.4: meta de <200 ms pro primeiro chunk, mas o spike mede arquivo completo, nao streaming) e qualidade de voz aceitavel para uso diario.
+- **NO-GO** caso contrario: considerar outras vozes, ou streaming de PCM via `--output-raw` (adiado pro M1), ou TTS alternativo (Kokoro, Supertonic — ver brainstorming 3).
+
+**Decisao:** ____ (data: ____)
