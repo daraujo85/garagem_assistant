@@ -16,7 +16,18 @@ use crate::audio::capture::AudioCapture;
 
 /// Atalho do push-to-talk. M2: via preferences.
 /// Formato aceito por `Shortcut::from_str` (modificadores + tecla, separados por `+`).
-pub const PTT_SHORTCUT: &str = "Ctrl+Shift+Space";
+///
+/// Default trocado de `Ctrl+Shift+Space` para `Ctrl+Alt+Space` apos achado real no M0-T03:
+/// `Ctrl+Shift+Space` conflita com outro app (Candy) na maquina de teste (brainstorming 2.1,
+/// R-M0-1: "combinacao ja em uso por outro app"). Sobrescrevivel sem recompilar via
+/// `GARAGEM_PTT_SHORTCUT`, para testar outras combinacoes se esta tambem colidir.
+pub const DEFAULT_PTT_SHORTCUT: &str = "Ctrl+Alt+Space";
+pub const PTT_SHORTCUT_ENV: &str = "GARAGEM_PTT_SHORTCUT";
+
+/// Resolve o atalho: env var se definida, senao o default.
+pub fn ptt_shortcut() -> String {
+    std::env::var(PTT_SHORTCUT_ENV).unwrap_or_else(|_| DEFAULT_PTT_SHORTCUT.to_string())
+}
 
 /// Nomes dos eventos Tauri consumidos pelo frontend (`src/App.svelte`).
 pub const EVENT_PRESSED: &str = "shortcut-pressed";
@@ -105,12 +116,15 @@ pub fn plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
         .build()
 }
 
-/// Registra `PTT_SHORTCUT`. Chamar no `setup`, depois de `app.manage(PttState::default())`.
+/// Registra o atalho resolvido por `ptt_shortcut()`. Chamar no `setup`, depois de
+/// `app.manage(PttState::default())`.
 pub fn register<R: Runtime>(app: &AppHandle<R>) {
-    match app.global_shortcut().register(PTT_SHORTCUT) {
-        Ok(()) => info!(shortcut = PTT_SHORTCUT, "atalho global registrado"),
-        // Causas tipicas: combinacao ja em uso por outro app, ou SO/sessao sem suporte (Wayland).
-        Err(e) => error!(shortcut = PTT_SHORTCUT, error = %e, "falha ao registrar atalho global"),
+    let shortcut = ptt_shortcut();
+    match app.global_shortcut().register(shortcut.as_str()) {
+        Ok(()) => info!(shortcut = %shortcut, "atalho global registrado"),
+        // Causas tipicas: combinacao ja em uso por outro app (achado real: Ctrl+Shift+Space
+        // colidia com o Candy), ou SO/sessao sem suporte (Wayland).
+        Err(e) => error!(shortcut = %shortcut, error = %e, "falha ao registrar atalho global"),
     }
 }
 
@@ -121,7 +135,7 @@ fn handle_event<R: Runtime>(app: &AppHandle<R>, shortcut: &Shortcut, event: Shor
     let now = Instant::now();
 
     // So um atalho registrado, mas confere para nao tratar atalhos futuros como PTT.
-    match PTT_SHORTCUT.parse::<Shortcut>() {
+    match ptt_shortcut().parse::<Shortcut>() {
         Ok(ptt) if &ptt == shortcut => {}
         _ => return,
     }

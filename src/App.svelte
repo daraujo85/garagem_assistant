@@ -415,7 +415,7 @@
   <OrbVisualizer assistantState={orbState} animate={false} />
   <p class="state">Estado: {state}</p>
   <section class="ptt">
-    <p>PTT (Ctrl+Shift+Space): <strong>{ptt}</strong></p>
+    <p>PTT (Ctrl+Alt+Space - default trocado no M0-T03, colidia com outro app): <strong>{ptt}</strong></p>
     <p>
       Ultimo hold:
       <strong>{lastHoldMs === null ? "-" : `${lastHoldMs.toFixed(1)} ms`}</strong>

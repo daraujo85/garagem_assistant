@@ -68,19 +68,51 @@ O spike do gateway (M0-T11) incluiu testes `curl` reais contra o 9router rodando
   padrao, o que pesa em custo e latencia. Registrado como pendencia a investigar no M1 (qual
   combo/config usar para minimizar isso).
 
+### Primeiro teste real no Windows (2026-11-05, apos o build)
+
+O usuario rodou `npm run tauri dev` no Windows de fato (nao so compilar — abrir a janela, clicar nos
+botoes). Resultados reais:
+
+- **Janelas abrem corretamente**: `GaragemAssistant` (main, 480x520) e `GaragemAssistant Orb`
+  (200x200, transparente) confirmadas por screenshot do usuario. O orb renderiza o gradiente radial
+  pulsante (Canvas2D) visivelmente, com o estado "Idle" e fps medido em 60 (alvo 60, medido 60,
+  `document.hidden: nao`) — M0-T09 funcionando de ponta a ponta.
+- **M0-T11 (gateway) testado de verdade pela UI** (nao so curl): 2 chamadas via botao "Testar
+  gateway", ambas com sucesso:
+  - `first_token_ms=940.1`, `total_ms=1350.2`, `chunks=2`, `model=claude-sonnet-5`
+  - `first_token_ms=798.9`, `total_ms=1249.0`, `chunks=3`, `model=claude-sonnet-5`
+  - Ambas dentro do orcamento do brainstorming 2.4 (300-1500ms). **GO preliminar para M0-T11**
+    (falta rodar as 20 chamadas pedidas pelo plano para p50/p95 solidos).
+- **M0-T03 (PTT) — achado real, NAO e so teorico**: o default `Ctrl+Shift+Space` **colide com outro
+  aplicativo instalado (Candy)** na maquina de teste. Exatamente o risco R-M0-1 do brainstorming
+  2.1 ("combinacao ja em uso por outro app"), confirmado na pratica. Acao tomada: o default foi
+  trocado para `Ctrl+Alt+Space`, com override por `GARAGEM_PTT_SHORTCUT` (env var) para testar
+  outras combinacoes sem recompilar, caso esta tambem colida. Teste do novo atalho: pendente
+  (aguardando o usuario testar apos o restart do app).
+- **GPU NVIDIA RTX 3060 confirmada acessivel** (via `nvidia-smi` no ambiente de desenvolvimento,
+  WSLg com passthrough de GPU) — resolve a duvida de D7 sobre hardware disponivel para o Whisper.
+- Warnings `libEGL: failed to open /dev/dri/renderD128/card0: Permission denied` apareceram no
+  ambiente de dev (WSLg); nao impediram a renderizacao (Canvas2D funcionou), mas sao um ponto de
+  atencao se o M1 usar WebGL de verdade (shader cru) em vez de Canvas2D — testar permissao de GPU
+  no Windows nativo tambem.
+
 ### Proximos passos (antes de considerar o M0 fechado)
 
-1. ~~Rodar `cargo check`/`cargo build` e resolver erros de API~~ **Feito neste ambiente (Linux)**.
-   Falta so confirmar que compila igual no Windows (deve compilar: nao ha `#[cfg(windows)]`
-   divergente alem do path do binario do cpal/piper, ja tratado com `#[cfg(windows)]`).
-2. Rodar `npm run tauri dev` no Windows de fato, com janela, mic e hardware reais.
-3. Preencher as 7 tabelas de resultados abaixo (uma por spike) com medicoes reais.
-4. Para cada spike, aplicar o criterio de go/no-go documentado na propria secao.
-5. Baixar manualmente: modelo Whisper ggml (M0-T06), binario Piper + vozes PT-BR (M0-T07).
-6. Consolidar os 7 veredictos (GO/NO-GO) numa decisao unica: o M0 so fecha quando todos os
-   componentes tiverem GO (ou um plano B aceito para os que derem NO-GO — ex: M0-T04 se o PTT falhar).
-7. So depois disso seguir para o M1 (loop de voz ponta a ponta) com confianca de que a base compila
-   e os numeros de latencia sao reais, nao estimados.
+1. ~~Rodar `cargo check`/`cargo build` e resolver erros de API~~ **Feito**.
+2. ~~Rodar `npm run tauri dev` no Windows de fato~~ **Feito — janela, orb e gateway confirmados
+   funcionando. PTT com atalho corrigido, teste pendente.**
+3. Testar o novo atalho (`Ctrl+Alt+Space`): segurar, falar, soltar — confirmar que `shortcut-pressed`/
+   `shortcut-released` disparam e que a captura de audio (M0-T05) grava o WAV.
+4. Testar M0-T06 (STT) e M0-T07 (TTS): precisam dos modelos baixados manualmente (Whisper ggml,
+   binario Piper + vozes PT-BR) — ainda nao feito.
+5. Testar M0-T08 (playback) e M0-T10 (IPC) na UI.
+6. Rodar as 20 chamadas de gateway pedidas pelo plano (M0-T11) para p50/p95 solidos.
+7. Preencher as 7 tabelas de resultados abaixo (uma por spike) com as medicoes.
+8. Para cada spike, aplicar o criterio de go/no-go documentado na propria secao.
+9. Consolidar os 7 veredictos (GO/NO-GO) numa decisao unica: o M0 so fecha quando todos os
+   componentes tiverem GO (ou um plano B aceito para os que derem NO-GO).
+10. So depois disso seguir para o M1 (loop de voz ponta a ponta) com confianca de que a base
+    compila e os numeros de latencia sao reais, nao estimados.
 
 ---
 
