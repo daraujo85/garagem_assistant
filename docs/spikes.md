@@ -97,3 +97,73 @@ Observacoes a anotar: `start_ms` (custo de abrir o device no Pressed), `dropped_
 - **NO-GO** caso contrario: revisar o resample ou o buffer sizing.
 
 **Decisao:** ____ (data: ____)
+
+---
+
+## Spike STT (M0-T06)
+
+Objetivo (plano M0-T06): `whisper-rs` transcrevendo o WAV da captura em PT-BR, com modelos `base` e `small` quantizados (q5_1), medindo tempo por 5 s de audio (CPU e, se houver, GPU), RAM residente, efeito do `initial_prompt` com vocabulario dev e taxa de erro em frases de referencia com termos tecnicos.
+
+### O que foi implementado
+
+- `src-tauri/src/audio/stt.rs` (novo):
+  - `WhisperStt::load(path)`: carrega o modelo ggml uma vez (`WhisperContext::new_with_params`). Erro claro, com link de download, se o arquivo nao existir. Caminho padrao `./models/ggml-base.bin`, sobrescrevivel pela env `GARAGEM_STT_MODEL`.
+  - `WhisperStt::transcribe(&Path) -> Result<TranscriptionResult, SttError>`: le o WAV (`hound`, exige 16 kHz mono, 16-bit ou f32), converte para f32 e roda `state.full` com `language="pt"` forcado, `initial_prompt` com vocabulario dev (git, commit, branch, merge, pull request, funcao, variavel, deploy, build, terminal, codigo...), Greedy (`best_of: 1`), sem contexto anterior e `n_threads = min(cores, 8)`.
+  - `TranscriptionResult`: texto, idioma (forcado), duracao do audio, `processing_ms`, `rtf`, segmentos com timestamps (ms), nome do modelo e caminho do WAV. `processing_ms` cobre so a inferencia (nao o carregamento do modelo nem a leitura do WAV); o tempo de carga sai no log `modelo Whisper carregado` (`load_ms`).
+  - Log via `tracing` de duracao, tempo, RTF e texto (spike: logar o texto e aceitavel para validar qualidade; producao M1+ nao loga transcricao por padrao).
+  - Comando Tauri `transcribe_last_capture`: pega o WAV mais recente (mtime) de `./captures/` e transcreve em `tokio::task::spawn_blocking` (brainstorming 2.1). O modelo e carregado de forma lazy na primeira chamada (`SttState`) e fica residente.
+- `src-tauri/src/main.rs`: `.manage(audio::stt::SttState::default())` e o comando no `invoke_handler`.
+- `src/App.svelte`: botao "Transcrever ultima captura" que mostra texto, modelo, duracao, tempo de processamento, RTF e idioma.
+- `src-tauri/Cargo.toml`: `whisper-rs = "0.13"` e feature opcional `cuda = ["whisper-rs/cuda"]`.
+- Fora de escopo (M1/M5): VAD, streaming por janelas, descarte de silencio, pre-load no boot, FSM.
+
+### Modelos (download manual)
+
+Nada e baixado pelo app. Fonte: <https://huggingface.co/ggerganov/whisper.cpp/tree/main> (mesmo conteudo do repo `ggerganov/whisper.cpp`, script `models/download-ggml-model.sh`).
+
+| Modelo | Arquivo | Tamanho aprox. |
+|---|---|---|
+| base | `ggml-base.bin` (f16), `ggml-base-q5_1.bin` | ~142 MB / ~60 MB |
+| small | `ggml-small.bin` (f16), `ggml-small-q5_1.bin` | ~466 MB / ~190 MB |
+
+Os nomes `-q5_1` devem ser conferidos na listagem do repo (os tamanhos sao aproximados). Colocar em `src-tauri/models/` (o cwd do `tauri dev` e `src-tauri/`; a pasta `models/` e `*.bin` ja estao no `.gitignore`). Para escolher o modelo: `$env:GARAGEM_STT_MODEL="./models/ggml-small-q5_1.bin"` antes do `npm run tauri dev`. Modelos `.en` nao servem (PT-BR exige o multilingue).
+
+### Frases de teste sugeridas (PT-BR com termos tecnicos)
+
+1. "faz um commit dessa branch e abre um pull request"
+2. "roda o build e verifica os logs do terminal"
+3. "qual e a funcao que trata esse erro"
+4. "da um merge da branch main na minha branch e resolve os conflitos"
+5. "cria uma variavel nova para guardar o resultado do deploy"
+6. "refatora essa funcao e adiciona um teste unitario"
+7. "mostra o diff do ultimo commit"
+8. "reinicia o servidor e confere se o build passou"
+9. "por que o deploy falhou ontem a noite"
+10. "abre o terminal e roda o git status"
+
+Gravar cada frase com ~5 s (e uma captura de silencio puro, para observar alucinacao; brainstorming 2.3).
+
+### Como testar no Windows
+
+1. Instalar os pre-requisitos de build do `whisper-rs`: CMake, MSVC Build Tools e LLVM (`LIBCLANG_PATH`). Para GPU, CUDA Toolkit e `--features cuda`.
+2. Baixar os modelos (secao acima) para `src-tauri/models/`.
+3. `$env:RUST_LOG="info"` e `npm run tauri dev` (primeiro build do whisper.cpp e demorado). Se a API do `whisper-rs` divergir, ajustar `stt.rs` (ver o aviso no topo do arquivo).
+4. Gravar uma frase com o atalho `Ctrl+Shift+Space` (spike M0-T05) e soltar.
+5. Clicar "Transcrever ultima captura". A primeira chamada inclui a carga do modelo (`load_ms` no log); repetir o clique para medir o tempo "quente".
+6. Anotar na tabela: duracao, `processing_ms`, RTF, texto obtido e erros. Medir a RAM residente do processo no Gerenciador de Tarefas apos a carga.
+7. Repetir para `base` e `small` (f16 e q5_1), em CPU e, se houver GPU, com `--features cuda`. Comparar tambem com e sem `initial_prompt` (editar `INITIAL_PROMPT` em `stt.rs`).
+
+### Resultados (preencher no Windows)
+
+Ambiente: SO/versao: ____ | CPU: ____ | GPU: ____ | Versao resolvida de `whisper-rs`: ____ | RAM residente apos carga (base / small): ____
+
+| Modelo | Duracao audio (s) | Tempo processamento (ms) | RTF (tempo_proc / duracao_audio) | Texto esperado | Texto obtido | Erros de transcricao | CPU ou GPU |
+|---|---|---|---|---|---|---|---|
+| | | | | | | | |
+
+### Criterio de go/no-go
+
+- **GO** se RTF < 1.0 em CPU com o modelo `base` ou `small`, e taxa de erro aceitavel nos termos tecnicos (ver brainstorming 2.4: orcamento de 300-800 ms para 5 s de audio).
+- **NO-GO** caso contrario: considerar modelo menor, GPU obrigatoria, ou alternativas como `sherpa-onnx` (ver brainstorming 2.3).
+
+**Decisao:** ____ (data: ____)

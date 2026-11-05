@@ -42,6 +42,11 @@ rodio = "0.20"
 rubato = "0.16"
 # Escrita do WAV (16-bit PCM, 16 kHz, mono) do spike de captura M0-T05. Crate leve, sem deps nativas.
 hound = "3.5"
+# STT (M0-T06): bindings do whisper.cpp. ATENCAO: a API do whisper-rs muda muito entre versoes
+# (0.13 usa full_n_segments/full_get_segment_text; 0.14+ trocou por iteradores de segmento). Versao
+# exata a confirmar no `cargo build` do Windows e fixar aqui. Compila o whisper.cpp via cmake +
+# bindgen: exige CMake, MSVC Build Tools e LLVM/libclang (LIBCLANG_PATH) instalados.
+whisper-rs = "0.13"
 
 # Motor de personalidade (templates)
 # Divergencia: minijinja 2.x (em vez de 1.0 do doc).
@@ -56,6 +61,12 @@ thiserror = "2"
 # Observabilidade com spans por estagio (brainstorming: "medir desde o dia 1").
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[features]
+# Aceleracao CUDA do Whisper (opcional). M0-T06 testa CPU primeiro, depois GPU:
+#   cargo build --features cuda   (ou `npm run tauri dev -- --features cuda`)
+# Exige o CUDA Toolkit instalado. Sem a feature, roda em CPU.
+cuda = ["whisper-rs/cuda"]
 
 [profile.release]
 # Binario menor para distribuicao; nao afeta dev.

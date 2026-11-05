@@ -4,7 +4,7 @@
 // Modulos conforme arquitetura_garagemassistant.md secao 2. Todos stubs no M0-T01.
 // A pasta e `core/` (fiel a arquitetura), mas o modulo se chama `brain` via #[path]: um
 // `mod core` na raiz sombrearia o crate `core` da std e pode gerar ambiguidade de paths.
-// Spike de captura (M0-T05) usado pelo shortcut.rs; tts_piper segue stub.
+// Spike de captura (M0-T05) usado pelo shortcut.rs; spike STT (M0-T06) em audio/stt.rs; tts_piper segue stub.
 #[allow(dead_code)]
 mod audio;
 #[allow(dead_code)]
@@ -48,12 +48,14 @@ fn main() {
         .manage(shortcut::PttState::default())
         // Estado do spike de captura (M0-T05): AudioCapture ativo durante o hold.
         .manage(shortcut::AudioState::default())
+        // Estado do spike STT (M0-T06): modelo Whisper carregado lazy na primeira transcricao.
+        .manage(audio::stt::SttState::default())
         .setup(|app| {
             shortcut::init_clock();
             shortcut::register(app.handle());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_state])
+        .invoke_handler(tauri::generate_handler![get_state, audio::stt::transcribe_last_capture])
         .run(tauri::generate_context!())
         .expect("erro ao executar a aplicacao Tauri");
 }

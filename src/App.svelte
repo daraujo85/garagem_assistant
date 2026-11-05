@@ -18,6 +18,25 @@
   // Orb reage ao atalho: Listening enquanto pressionado (cores definidas em OrbVisualizer).
   let orbState = $derived(ptt === "escutando" ? "Listening" : state);
 
+  // Spike STT (M0-T06): botao manual que transcreve o WAV mais recente de ./captures/.
+  // Descartavel: em M1 a transcricao e disparada pela FSM ao soltar o atalho.
+  let sttBusy = $state(false);
+  let sttResult = $state(null);
+  let sttError = $state("");
+
+  async function transcribeLast() {
+    sttBusy = true;
+    sttError = "";
+    try {
+      sttResult = await invoke("transcribe_last_capture");
+    } catch (e) {
+      sttResult = null;
+      sttError = String(e);
+    } finally {
+      sttBusy = false;
+    }
+  }
+
   onMount(() => {
     // `listen` e async; guardamos as promises para desinscrever no cleanup (evita listener
     // duplicado com HMR do dev server).
@@ -61,6 +80,20 @@
     </p>
     <p class="counts">Pressed: {pressedCount} | Released: {releasedCount}</p>
   </section>
+  <section class="stt">
+    <button onclick={transcribeLast} disabled={sttBusy}>
+      {sttBusy ? "Transcrevendo..." : "Transcrever ultima captura"}
+    </button>
+    {#if sttResult}
+      <p class="stt-text">"{sttResult.text}"</p>
+      <p class="counts">
+        {sttResult.model} | audio {sttResult.audio_secs.toFixed(2)} s |
+        processamento {sttResult.processing_ms} ms | RTF {sttResult.rtf.toFixed(2)} |
+        idioma {sttResult.language}
+      </p>
+    {/if}
+    {#if sttError}<p class="error">{sttError}</p>{/if}
+  </section>
   {#if error}<p class="error">{error}</p>{/if}
 </main>
 
@@ -95,6 +128,14 @@
   .counts {
     opacity: 0.6;
     font-size: 0.8rem;
+  }
+  .stt {
+    text-align: center;
+    font-size: 0.95rem;
+    max-width: 90%;
+  }
+  .stt-text {
+    margin: 0.5rem 0 0.25rem;
   }
   .error {
     color: #ff6b6b;
