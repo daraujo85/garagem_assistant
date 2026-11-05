@@ -2,6 +2,56 @@
 
 Registro dos spikes de risco do marco M0 (ver `docs/plano.md`). Codigo de spike e descartavel; as medicoes ficam aqui.
 
+## Consolidacao (M0-T12)
+
+Status em 2026-11-05: **todo o codigo dos 7 spikes abaixo foi escrito, mas nenhuma linha foi
+compilada ou executada**. O ambiente de desenvolvimento (WSL2 Linux) nao tem Rust/cargo instalado,
+e o SO-alvo real e o Windows. Isso significa que **nenhuma medicao real existe ainda** — todas as
+tabelas de resultados abaixo estao vazias, esperando serem preenchidas rodando `npm run tauri dev`
+no Windows.
+
+### O que foi escrito (resumo por spike)
+
+| Spike | Tarefa | O que faz | Dependencias de API nao verificadas |
+|---|---|---|---|
+| PTT | M0-T03 | Handler Pressed/Released do atalho global (`Ctrl+Shift+Space`), timestamps, prova visual | `tauri-plugin-global-shortcut` v2 (`with_handler`, `event.state()`, comparacao de `Shortcut`) |
+| Captura de audio | M0-T05 | Thread dedicada (`cpal::Stream` e `!Send`), ringbuf SPSC, resample 16kHz mono (`rubato`), grava WAV (`hound`) | `rubato::FftFixedIn` (API 0.16), `ringbuf::traits` |
+| STT | M0-T06 | Transcricao PT-BR em lote com `whisper-rs`, idioma forcado, initial_prompt tecnico, mede RTF | `whisper-rs` 0.13 (`create_state`, `full_n_segments`, getters de segmento mudaram em 0.14+) |
+| TTS | M0-T07 | Piper como sidecar (stdin texto -> WAV), nao binding Rust | Flags do binario Piper (rhasspy MIT vs piper1-gpl GPL podem divergir) |
+| Playback | M0-T08 | Dois backends (Rodio vs Cpal puro) comparados, mede stop_latency_ms (base do barge-in) | `rodio` 0.20 (`OutputStream::try_default`/`Sink::try_new` podem ter mudado pra `OutputStreamBuilder`) |
+| Janela/Orb | M0-T09 | Janela transparente separada (`orb`, 200x200, always-on-top, click-through), Canvas2D com controle de fps e pausa via Page Visibility | Nomes de permissao em `capabilities/orb.json`, se `document.hidden` dispara em `hide()`/minimize no WebView2 |
+| IPC | M0-T10 | Benchmark `emit` vs `tauri::ipc::Channel` em 10/30/60Hz, mede jitter | Bound de `Channel<T>` (`IpcResponse`), forma de passar o channel no `invoke` do JS |
+| Gateway | M0-T11 | Cliente HTTP/SSE pro 9router, **validado parcialmente com curl real** (ver abaixo) | `reqwest` 0.12 (`chunk()`, `no_proxy`) |
+
+### Achado real (nao e so codigo nao testado)
+
+O spike do gateway (M0-T11) incluiu testes `curl` reais contra o 9router rodando neste WSL2
+(mirrored networking), sem esperar pelo Windows:
+- 9router acessivel em `localhost:20128`, `/v1/chat/completions` com `claude-tudao` + `stream:true`
+  funciona, formato OpenAI-compativel confirmado.
+- Exige `Authorization: Bearer <token>`.
+- 5 chamadas baseline: first byte 0.60-0.70s, total 1.03-1.16s — dentro do orcamento do
+  brainstorming 2.4 (300-1500ms), mas **nao e o ambiente final** (Windows pode variar).
+- `prompt_tokens=2052` para uma pergunta de 10 palavras: o gateway injeta contexto grande por
+  padrao, o que pesa em custo e latencia. Registrado como pendencia a investigar no M1 (qual
+  combo/config usar para minimizar isso).
+
+Esse e o UNICO dado real de todo o M0 ate agora. Todo o resto depende do teste no Windows.
+
+### Proximos passos (antes de considerar o M0 fechado)
+
+1. Rodar `npm install` e `npm run tauri dev` no Windows. Resolver os erros de `cargo build` que
+   aparecerem (lista de pontos de atencao por spike na tabela acima).
+2. Preencher as 7 tabelas de resultados abaixo (uma por spike).
+3. Para cada spike, aplicar o criterio de go/no-go documentado na propria secao.
+4. Baixar manualmente: modelo Whisper ggml (M0-T06), binario Piper + vozes PT-BR (M0-T07).
+5. Consolidar os 7 veredictos (GO/NO-GO) numa decisao unica: o M0 so fecha quando todos os
+   componentes tiverem GO (ou um plano B aceito para os que derem NO-GO — ex: M0-T04 se o PTT falhar).
+6. So depois disso seguir para o M1 (loop de voz ponta a ponta) com confianca de que a base compila
+   e os numeros de latencia sao reais, nao estimados.
+
+---
+
 ## Spike PTT (M0-T03)
 
 **Status:** implementado, NAO compilado nem testado (escrito em WSL2 sem Rust). Medicoes pendentes no Windows.
